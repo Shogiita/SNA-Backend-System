@@ -1,5 +1,5 @@
 import networkx as nx
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 import leidenalg as la
 import igraph as ig
 import random
@@ -80,3 +80,44 @@ async def create_social_graph():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal memproses graf: {str(e)}")
+
+def _format_to_pajek(graph: nx.Graph) -> str:
+    """Helper function to convert a NetworkX graph to Pajek .net format string."""
+    pajek_str = f"*Vertices {graph.number_of_nodes()}\n"
+    
+    node_to_id = {node: i + 1 for i, node in enumerate(graph.nodes())}
+    
+    for node, node_id in node_to_id.items():
+        pajek_str += f'{node_id} "{node}"\n'
+
+    pajek_str += "*Edges\n"
+        
+    for u, v in graph.edges():
+        pajek_str += f"{node_to_id[u]} {node_to_id[v]}\n"
+        
+    return pajek_str
+
+async def create_social_graph_pajek():
+    """
+    Logika mandiri untuk membuat graf dari data dummy dan mengembalikannya
+    dalam format teks Pajek (.net).
+    """
+    try:
+        users, posts = _generate_large_dummy_data()
+
+        G = nx.Graph()
+
+        for user in users:
+            G.add_node(f"user_{user['username']}", type="user", name=user['username'])
+        for post in posts:
+            G.add_node(f"post_{post['post_id']}", type="post", author=post['author'])
+            G.add_edge(f"user_{post['author']}", f"post_{post['post_id']}", relation="AUTHORED")
+            if "reply_to_post_id" in post:
+                G.add_edge(f"post_{post['post_id']}", f"post_{post['reply_to_post_id']}", relation="REPLIED_TO")
+
+        pajek_output = _format_to_pajek(G)
+
+        return Response(content=pajek_output, media_type="text/plain")
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal memproses graf untuk Pajek: {str(e)}")
