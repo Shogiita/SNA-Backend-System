@@ -5,6 +5,7 @@ from app.database import db
 
 # endpoint for post
 async def get_all_posts_from_db():
+    """Logika untuk mengambil semua post dari koleksi 'kawanss'."""
     try:
         posts_list = []
         docs_stream = db.collection('kawanss').stream()
@@ -12,9 +13,10 @@ async def get_all_posts_from_db():
         
         for doc in docs:
             post_data = doc.to_dict()
-            post_data['id'] = doc.id
-            posts_list.append(post_data)
+            if post_data:
+                post_data['id'] = doc.id
+                posts_list.append(post_data)
             
         return posts_list
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil data posts (kawanss): {str(e)}")

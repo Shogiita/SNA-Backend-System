@@ -25,14 +25,18 @@ async def get_user_by_id(user_id: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 async def get_all_users_from_db():
+    """Logika untuk mengambil semua pengguna dari koleksi 'users'."""
     try:
         users_list = []
         docs_stream = db.collection('users').stream()
         docs = await asyncio.to_thread(list, docs_stream)
+        
         for doc in docs:
             user_data = doc.to_dict()
-            user_data['id'] = doc.id
-            users_list.append(user_data)
+            if user_data:
+                user_data['id'] = doc.id
+                users_list.append(user_data)
+            
         return users_list
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil data users: {str(e)}")
