@@ -1,22 +1,22 @@
+import asyncio
 from fastapi import HTTPException
-from app.database import db 
+from app.database import db
 
-def get_test_message():
-    """Logika untuk endpoint tes."""
+# endpoint for users
+async def get_test_message():
     return {"status": "success"}
 
-def create_new_user(user_data: dict):
-    """Logika untuk membuat pengguna baru."""
+async def create_new_user(user_data: dict):
     try:
-        doc_ref = db.collection('users').add(user_data)
+        doc_ref = await asyncio.to_thread(db.collection('users').add, user_data)
         return {"message": "Pengguna berhasil dibuat", "user_id": doc_ref[1].id}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-def get_user_by_id(user_id: str):
-    """Logika untuk mengambil satu pengguna berdasarkan ID."""
+async def get_user_by_id(user_id: str):
     try:
-        doc = db.collection('users').document(user_id).get()
+        doc_ref = db.collection('users').document(user_id)
+        doc = await asyncio.to_thread(doc_ref.get)
         if doc.exists:
             return doc.to_dict()
         else:
@@ -24,11 +24,11 @@ def get_user_by_id(user_id: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-def get_all_users_from_db():
-    """Logika untuk mengambil semua pengguna."""
+async def get_all_users_from_db():
     try:
         users_list = []
-        docs = db.collection('users').stream()
+        docs_stream = db.collection('users').stream()
+        docs = await asyncio.to_thread(list, docs_stream)
         for doc in docs:
             user_data = doc.to_dict()
             user_data['id'] = doc.id
