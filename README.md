@@ -1,5 +1,5 @@
-### SNA-Backend-System
-#### 1. Create and Activate Virtual Environment
+# SNA-Backend-System
+## 1. Create and Activate Virtual Environment
 
 ### Create venv
 * python -m venv venv
@@ -10,19 +10,19 @@
 ### Activate venv (macOS / Linux)
 * source venv/bin/activate
 
-### 2. Install Libraries
+## 2. Install Libraries
 
-#### Install all required libraries
+### Install all required libraries
 * pip install fastapi "uvicorn[standard]" networkx python-leidenalg igraph firebase-admin
 
-### 3. Firebase Configuration
+## 3. Firebase Configuration
 
 * Make sure the serviceAccountKey.json file is in the project's root directory.
 
-#### 4. Run Program
+## 4. Run Program
 * uvicorn app.main:app --reload
 
-#### 5. API Endpoints
+## 5. API Endpoints
 
 * **`GET /`**
     * Welcome message from the API.
