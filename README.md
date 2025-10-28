@@ -1,31 +1,28 @@
 # SNA-Backend-System
-
-A backend system for Social Network Analysis (SNA) built with FastAPI.
-
 ### 1. Create and Activate Virtual Environment
 
 # Create venv
-# # python -m venv venv
+* python -m venv venv
 
 # Activate venv (Windows)
-# # .\venv\Scripts\activate
+* .\venv\Scripts\activate
 
 # Activate venv (macOS / Linux)
-# # source venv/bin/activate
+* source venv/bin/activate
 
 ### 2. Install Libraries
 
 # Install all required libraries
-# # pip install fastapi "uvicorn[standard]" networkx python-leidenalg igraph firebase-admin
+* pip install fastapi "uvicorn[standard]" networkx python-leidenalg igraph firebase-admin
 
 ### 3. Firebase Configuration
 
-# Make sure the serviceAccountKey.json file is in the project's root directory.
+* Make sure the serviceAccountKey.json file is in the project's root directory.
 
 ### 4. Run Program
 
 # Run the server with uvicorn
-# # uvicorn app.main:app --reload
+* uvicorn app.main:app --reload
 
 ### 5. API Endpoints
 
