@@ -1,6 +1,11 @@
 from fastapi import APIRouter
 from app.controllers import sna_controller
 from typing import Literal
+from fastapi import APIRouter, HTTPException
+from app.controllers.sna_graph_controller import SnaGraphController
+
+router = APIRouter()
+controller = SnaGraphController()
 
 router = APIRouter(
     prefix="/sna",
@@ -30,3 +35,15 @@ def visualize_graph_endpoint(metric: Literal['degree', 'betweenness', 'closeness
     Membuat file HTML visualisasi SNA berdasarkan data yang sudah di-ingest.
     """
     return sna_controller.generate_sna_html(metric_type=metric)
+
+@router.post("/graph/interaction/comment")
+async def record_comment(username: str, post_id: str, sentiment: str = "neutral"):
+    success = controller.add_comment_interaction(username, post_id, sentiment)
+    if not success:
+        raise HTTPException(status_code=500, detail="Gagal menyimpan ke Graph")
+    return {"message": "Interaksi berhasil direkam di Neo4j"}
+
+@router.get("/graph/analysis/top-users")
+async def get_top_users():
+    data = controller.get_top_active_users()
+    return {"data": data}
