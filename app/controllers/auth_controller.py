@@ -1,8 +1,6 @@
 import httpx
 from fastapi import HTTPException
-from app import config  # <-- Mengimpor file config.py Anda
-
-# URL ini spesifik untuk me-refresh token Instagram (berbeda dari GRAPH_API_URL Anda)
+from app import config 
 INSTAGRAM_REFRESH_URL = "https://graph.instagram.com"
 
 async def refresh_instagram_token():
@@ -11,7 +9,6 @@ async def refresh_instagram_token():
     menggunakan variabel dari config.py.
     """
     
-    # Menggunakan variabel IG_ACCESS_TOKEN dari config.py
     current_token = config.IG_ACCESS_TOKEN 
     
     if not current_token or current_token.startswith("MASUKKAN"):
@@ -20,10 +17,8 @@ async def refresh_instagram_token():
             detail="INSTAGRAM_ACCESS_TOKEN tidak diatur atau masih placeholder di file .env"
         )
 
-    # Endpoint untuk refresh token
     refresh_url = f"{INSTAGRAM_REFRESH_URL}/refresh_access_token"
     
-    # Parameter yang diperlukan oleh API Meta
     params = {
         "grant_type": "ig_refresh_token",
         "access_token": current_token
@@ -35,7 +30,6 @@ async def refresh_instagram_token():
 
         if response.status_code == 200:
             data = response.json()
-            # Token baru akan ada di 'access_token'
             return {
                 "message": "Token berhasil di-refresh",
                 "new_access_token": data.get("access_token"),
@@ -43,7 +37,6 @@ async def refresh_instagram_token():
                 "token_type": data.get("token_type")
             }
         else:
-            # Jika gagal (misal: token lama sudah kedaluwarsa)
             raise HTTPException(
                 status_code=response.status_code,
                 detail=f"Gagal me-refresh token: {response.json()}"

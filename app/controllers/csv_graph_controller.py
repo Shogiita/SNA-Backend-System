@@ -6,10 +6,6 @@ from typing import Literal
 CSV_FILE_PATH = "twitter_dataset.csv"
 
 async def create_graph_from_csv(output_format: Literal['json', 'pajek'] = 'json'):
-    """
-    Logika untuk membangun graf dari dataset twitter_dataset.csv.
-    Mendukung output dalam format JSON atau Pajek.
-    """
     try:
         try:
             df = pd.read_csv(CSV_FILE_PATH, nrows=500)

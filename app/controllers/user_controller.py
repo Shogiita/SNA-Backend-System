@@ -2,7 +2,6 @@ import asyncio
 from fastapi import HTTPException
 from app.database import db
 
-# endpoint for users
 async def get_test_message():
     return {"status": "success"}
 

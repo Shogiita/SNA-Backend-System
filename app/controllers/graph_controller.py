@@ -32,10 +32,6 @@ def _generate_large_dummy_data():
     return users, posts
 
 async def create_social_graph():
-    """
-    Logika mandiri untuk membuat graf dari 150+ data dummy konsisten, 
-    menghitung betweenness centrality, dan mendeteksi komunitas dengan algoritma Leiden.
-    """
     try:
         users, posts = _generate_large_dummy_data()
 
@@ -82,7 +78,6 @@ async def create_social_graph():
         raise HTTPException(status_code=500, detail=f"Gagal memproses graf: {str(e)}")
 
 def _format_to_pajek(graph: nx.Graph) -> str:
-    """Helper function to convert a NetworkX graph to Pajek .net format string."""
     pajek_str = f"*Vertices {graph.number_of_nodes()}\n"
     
     node_to_id = {node: i + 1 for i, node in enumerate(graph.nodes())}
@@ -98,10 +93,6 @@ def _format_to_pajek(graph: nx.Graph) -> str:
     return pajek_str
 
 async def create_social_graph_pajek():
-    """
-    Logika mandiri untuk membuat graf dari data dummy dan mengembalikannya
-    dalam format teks Pajek (.net).
-    """
     try:
         users, posts = _generate_large_dummy_data()
 

@@ -3,7 +3,6 @@ import asyncio
 from fastapi import HTTPException
 from app.database import db
 
-# endpoint for post
 async def get_all_posts_from_db():
     """Logika untuk mengambil semua post dari koleksi 'kawanss'."""
     try:
