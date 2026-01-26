@@ -6,7 +6,9 @@ from app.routers import (
     graph_router, 
     ss_graph_router, 
     ml_router,
-    auth_router
+    auth_router,
+    instagram_router, # Pastikan ini ada (dari perbaikan sebelumnya)
+    sna_router        # <--- TAMBAHKAN INI (1)
 )
 
 app = FastAPI(
@@ -22,6 +24,8 @@ app.include_router(ss_graph_router.router)
 app.include_router(csv_graph_router.router)
 app.include_router(ml_router.router)
 app.include_router(auth_router.router)
+app.include_router(instagram_router.router) # Pastikan ini ada
+app.include_router(sna_router.router)       # <--- TAMBAHKAN INI (2)
 
 @app.get("/")
 def read_root():

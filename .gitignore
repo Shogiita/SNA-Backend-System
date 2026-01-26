@@ -208,3 +208,10 @@ __marimo__/
 
 serviceAccountKey.json
 twitter_dataset.csv
+
+# --- SNA Generated Files ---
+instagram_data_cache.json
+data_cache.json
+dataset.csv
+dataset_ss*.csv
+generated_graphs/
