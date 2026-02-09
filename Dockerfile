@@ -26,7 +26,7 @@ COPY ./app ./app
 RUN mkdir -p generated_graphs
 
 # Set environment variable port
-ENV PORT=8080
+ENV PORT=8000
 
 # Command jalan
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
