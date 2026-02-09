@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+networkx
+python-leidenalg
+igraph
+firebase-admin
+httpx
+python-dotenv
+pandas
+scikit-learn
+requests
+python-dateutil
+pyvis

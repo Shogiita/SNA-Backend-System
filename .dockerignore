@@ -1,0 +1,9 @@
+__pycache__
+venv/
+.env
+.git
+.gitignore
+*.pyc
+generated_graphs/
+dataset_ss*.csv
+instagram_data_cache.json
