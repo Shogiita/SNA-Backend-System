@@ -1,0 +1,39 @@
+steps:
+  # Langkah 1: Build Docker Image
+  - name: "gcr.io/cloud-builders/docker"
+    id: "Build-Image"
+    args:
+      - "build"
+      - "-t"
+      - "gcr.io/$PROJECT_ID/sna-backend-api:$SHORT_SHA"
+      - "."
+
+  # Langkah 2: Push Docker Image ke Google Container Registry (GCR)
+  - name: "gcr.io/cloud-builders/docker"
+    id: "Push-Image"
+    args:
+      - "push"
+      - "gcr.io/$PROJECT_ID/sna-backend-api:$SHORT_SHA"
+
+  # Langkah 3: Deploy ke Cloud Run
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "Deploy-Cloud-Run"
+    entrypoint: gcloud
+    args:
+      - "run"
+      - "deploy"
+      - "sna-backend-service"
+      - "--image"
+      - "gcr.io/$PROJECT_ID/sna-backend-api:$SHORT_SHA"
+      - "--region"
+      - "asia-southeast2" # Ganti jika region Anda berbeda (misal: asia-southeast1 untuk Singapura)
+      - "--platform"
+      - "managed"
+      - "--allow-unauthenticated"
+      # Menggunakan substitusi variabel untuk Environment Variables (agar tidak hardcode di file)
+      - "--set-env-vars"
+      - "INSTAGRAM_BUSINESS_ACCOUNT_ID=$_IG_BIZ_ID,INSTAGRAM_ACCESS_TOKEN=$_IG_TOKEN,INSTAGRAM_APP_ID=$_IG_APP_ID,INSTAGRAM_APP_SECRET=$_IG_APP_SECRET,INSTAGRAM_USERNAME=$_IG_USERNAME"
+
+# Memberitahu Cloud Build image mana yang dihasilkan dari proses ini
+images:
+  - "gcr.io/$PROJECT_ID/sna-backend-api:$SHORT_SHA"
