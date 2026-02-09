@@ -1,38 +1,36 @@
-# Gunakan image Python yang ringan namun memiliki dependensi build dasar (slim)
-FROM python:3.10-slim
+# GANTI DARI 3.10 MENJADI 3.11 untuk support library terbaru
+FROM python:3.11.4
 
 # Set working directory di dalam container
 WORKDIR /code
 
-# Install build dependencies yang mungkin dibutuhkan oleh igraph/leidenalg
-# (gcc, g++ dibutuhkan untuk kompilasi beberapa library C)
+# Install build dependencies (gcc, g++, cmake) 
+# leidenalg/igraph sering membutuhkan kompilasi C core
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
-# Salin requirements.txt terlebih dahulu untuk memanfaatkan caching layer Docker
+# Salin requirements.txt terlebih dahulu
 COPY requirements.txt .
 
-# Install dependencies Python
-RUN pip install --no-cache-dir --upgrade -r requirements.txt
+# Upgrade pip dan install dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Salin seluruh kode aplikasi ke dalam container
-# Folder 'app' disalin ke /code/app
+# Salin seluruh kode aplikasi
 COPY ./app ./app
 
-# Salin file-file pendukung yang dibutuhkan oleh controller
-# (Sesuai kode di csv_graph_controller.py dan database.py)
+# Salin file pendukung (Service Account & Dataset)
 COPY serviceAccountKey.json .
 COPY twitter_dataset.csv .
 
-# Buat folder untuk output generate graph agar tidak error saat runtime
-# (Sesuai kode di sna_controller.py)
+# Buat folder output
 RUN mkdir -p generated_graphs
 
-# Set environment variable untuk port (Cloud Run default menggunakan 8080)
+# Set environment variable port
 ENV PORT=8080
 
-# Command untuk menjalankan aplikasi saat container start
-# Kita menggunakan host 0.0.0.0 agar bisa diakses dari luar container
+# Command jalan
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
