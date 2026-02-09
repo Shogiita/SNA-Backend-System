@@ -22,10 +22,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Salin seluruh kode aplikasi
 COPY ./app ./app
 
-# Salin file pendukung (Service Account & Dataset)
-COPY serviceAccountKey.json .
-COPY twitter_dataset.csv .
-
 # Buat folder output
 RUN mkdir -p generated_graphs
 
