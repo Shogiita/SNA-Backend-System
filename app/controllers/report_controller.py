@@ -48,6 +48,15 @@ def get_main_dashboard_summary():
         ).get())
 
         top_posts_query = posts_ref.order_by('jumlahView', direction=firestore.Query.DESCENDING).limit(10).stream()
+
+        kawan_ss_post = db.collection('kawanss')
+
+        thirty_days_ago_kawanss = now - timedelta(days=30)
+        new_posts_30d_kawanss = len(kawan_ss_post.where(
+            filter=FieldFilter('uploadDate', '>=', thirty_days_ago_kawanss)
+        ).get())
+
+        total_kawanss = len(kawan_ss_post.get())
         
         top_posts = []
         for doc in top_posts_query:
@@ -81,13 +90,16 @@ def get_main_dashboard_summary():
                 "users": {
                     "total": total_users,
                     "total_post": total_posts,
+                    "total_post_kawanss": total_kawanss,
                     "new_this_month": new_users_this_month,
                     "new_last_month": new_users_last_month,
                     "growth_percentage": round(user_growth_percent, 2),
                 },
                 "posts": {
                     "total": total_posts,
-                    "new_30_days": new_posts_30d
+                    "new_30_days": new_posts_30d,
+                    "total_kawn_ss": total_kawanss,
+                    "new_30_days_kawanss": new_posts_30d_kawanss
                 },
                 "top_content": top_posts,
                 "integrations": integrations
