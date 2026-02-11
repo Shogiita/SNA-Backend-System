@@ -23,13 +23,13 @@ def get_main_dashboard_summary():
         first_day_last_month = last_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
         new_users_this_month = len(users_ref.where(
-            filter=FieldFilter('created_at', '>=', first_day_this_month)
+            filter=FieldFilter('joinDate', '>=', first_day_this_month)
         ).get())
         
         new_users_last_month = len(users_ref.where(
-            filter=FieldFilter('created_at', '>=', first_day_last_month)
+            filter=FieldFilter('joinDate', '>=', first_day_last_month)
         ).where(
-            filter=FieldFilter('created_at', '<', first_day_this_month)
+            filter=FieldFilter('joinDate', '<', first_day_this_month)
         ).get())
         
         user_growth_percent = 0
@@ -84,7 +84,6 @@ def get_main_dashboard_summary():
                     "new_this_month": new_users_this_month,
                     "new_last_month": new_users_last_month,
                     "growth_percentage": round(user_growth_percent, 2),
-                    "comparison_text": f"{new_users_this_month} vs {new_users_last_month} bulan lalu"
                 },
                 "posts": {
                     "total": total_posts,
