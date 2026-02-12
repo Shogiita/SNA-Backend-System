@@ -7,24 +7,27 @@ import igraph as ig
 import concurrent.futures
 import textwrap
 import os
-import glob  # Tambahan untuk mencari file
-import re    # Tambahan untuk regex nama file
+import glob
+import re
 import pandas as pd
+import asyncio  # Tambahan untuk async
 from datetime import datetime, timezone
 from dateutil.relativedelta import relativedelta
 from dateutil import parser
 from pyvis.network import Network
 from fastapi import HTTPException
 from fastapi.responses import HTMLResponse, Response
-from app import config 
+from app import config
+from app.database import db # Tambahan untuk koneksi Firestore
+from google.cloud.firestore import FieldFilter
 
 CACHE_FILE = "instagram_data_cache.json"
 OUTPUT_HTML_DIR = "generated_graphs"
 
 # --- KONFIGURASI LIMIT ---
-MAX_POSTS_TO_FETCH = 10000  
-FETCH_MONTHS_BACK = 12  
-MAX_WORKERS = 20     
+MAX_POSTS_TO_FETCH = 10000
+FETCH_MONTHS_BACK = 12
+MAX_WORKERS = 20
 # -------------------------
 
 os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
@@ -262,15 +265,12 @@ def get_dataset_flat():
     base_name = "dataset_ss"
     ext = ".csv"
     
-    # Cari semua file yang diawali 'dataset_ss' dan diakhiri '.csv' di folder saat ini
     existing_files = glob.glob(f"{base_name}*{ext}")
     max_num = 0
     
     for f in existing_files:
         try:
-            # Ambil nama file saja (jika path absolute)
             name = os.path.basename(f)
-            # Regex untuk mengambil angka: dataset_ss(ANGKA).csv
             match = re.search(r"dataset_ss(\d+)\.csv", name)
             if match:
                 num = int(match.group(1))
@@ -279,15 +279,12 @@ def get_dataset_flat():
         except:
             continue
             
-    # Tentukan nomor berikutnya
     next_num = max_num + 1
     new_filename = f"{base_name}{next_num}{ext}"
     
-    # Simpan File ke Server (Disk)
     df.to_csv(new_filename, index=False)
     print(f"✅ File CSV baru berhasil disimpan: {new_filename}")
 
-    # Baca kembali konten file untuk dikirim sebagai response download
     with open(new_filename, "r", encoding="utf-8") as f:
         csv_content = f.read()
 
@@ -382,3 +379,163 @@ def generate_sna_html(metric_type: str = "degree"):
         html_content = f.read()
         
     return HTMLResponse(content=html_content, status_code=200)
+
+async def analyze_firestore_network():
+    """
+    Membangun graf SNA dari data Firestore (Users, Likes, Comments).
+    Menghitung Centrality (Degree, Betweenness, Closeness, Eigenvector) & Komunitas (Leiden).
+    """
+    try:
+        # --- 1. FETCH DATA (Async Wrapper untuk Firestore Client yg Blocking) ---
+        # Kita gunakan asyncio.to_thread agar tidak memblokir main thread FastAPI
+        users_ref = db.collection('user') # Menggunakan nama koleksi 'user' (bukan users) sesuai skema Anda
+        posts_ref = db.collection('kawanss')
+        likes_ref = db.collection('kawanssLikes')
+        comments_ref = db.collection('kawanssComments')
+
+        # Helper untuk fetch semua docs
+        def get_all_docs(collection_ref):
+            return {doc.id: doc.to_dict() for doc in collection_ref.stream()}
+        
+        # Jalankan fetch secara paralel
+        users_data, posts_data, likes_data, comments_data = await asyncio.gather(
+            asyncio.to_thread(get_all_docs, users_ref),
+            asyncio.to_thread(get_all_docs, posts_ref),
+            asyncio.to_thread(get_all_docs, likes_ref),
+            asyncio.to_thread(get_all_docs, comments_ref)
+        )
+
+        # --- 2. BANGUN GRAF (NetworkX) ---
+        G = nx.DiGraph()
+
+        # Tambahkan Nodes (User)
+        for uid, data in users_data.items():
+            # Gunakan nama asli atau fallback ke 'Unknown'
+            label = data.get('nama', data.get('username', 'Unknown')) 
+            G.add_node(uid, label=label, type="user")
+
+        # Mapping: Post ID -> Author ID
+        # Agar kita tahu siapa yang harus diberi "skor" saat dilike/dikomen
+        post_author_map = {}
+        for pid, data in posts_data.items():
+            author_id = data.get('userId') # Sesuai struktur data Anda
+            if author_id:
+                post_author_map[pid] = author_id
+
+        # Tambahkan Edges (Interaksi)
+        # Bobot: Like = 1, Comment = 3
+        
+        # Proses Likes
+        for data in likes_data.values():
+            liker_id = data.get('userUid') # Sesuai struktur 'kawanssLikes'
+            post_id = data.get('kawanssUid')
+            
+            if liker_id and post_id and post_id in post_author_map:
+                target_id = post_author_map[post_id]
+                if liker_id != target_id: # Abaikan self-like
+                    if G.has_edge(liker_id, target_id):
+                        G[liker_id][target_id]['weight'] += 1
+                    else:
+                        G.add_edge(liker_id, target_id, weight=1, type='LIKE')
+
+        # Proses Comments
+        for data in comments_data.values():
+            commenter_id = data.get('userId') # Sesuai struktur 'kawanssComments'
+            post_id = data.get('kawanssUid')
+            
+            if commenter_id and post_id and post_id in post_author_map:
+                target_id = post_author_map[post_id]
+                if commenter_id != target_id:
+                    if G.has_edge(commenter_id, target_id):
+                        G[commenter_id][target_id]['weight'] += 3
+                    else:
+                        G.add_edge(commenter_id, target_id, weight=3, type='COMMENT')
+
+        # --- 3. HITUNG CENTRALITY ---
+        if G.number_of_nodes() == 0:
+            return {"message": "Graf kosong, tidak ada data user/interaksi."}
+
+        degree = nx.degree_centrality(G)
+        betweenness = nx.betweenness_centrality(G, weight='weight')
+        closeness = nx.closeness_centrality(G)
+        try:
+            eigenvector = nx.eigenvector_centrality(G, weight='weight', max_iter=500)
+        except:
+            eigenvector = {n: 0 for n in G.nodes()} # Fallback jika tidak konvergen
+
+        # --- 4. DETEKSI KOMUNITAS (Leiden) ---
+        # Konversi ke iGraph untuk Leiden
+        mapping = {node: i for i, node in enumerate(G.nodes())}
+        reverse_mapping = {i: node for node, i in mapping.items()}
+        
+        ig_G = ig.Graph(directed=True)
+        ig_G.add_vertices(len(G.nodes()))
+        ig_edges = [(mapping[u], mapping[v]) for u, v in G.edges()]
+        ig_G.add_edges(ig_edges)
+        
+        if nx.is_weighted(G):
+            ig_G.es['weight'] = [G[u][v]['weight'] for u, v in G.edges()]
+
+        # Jalankan Leiden
+        # Menggunakan ModularityVertexPartition untuk kualitas klaster terbaik
+        partition = la.find_partition(
+            ig_G, 
+            la.ModularityVertexPartition,
+            weights=ig_G.es['weight'] if 'weight' in ig_G.es.attributes() else None,
+            n_iterations=-1
+        )
+
+        # Mapping hasil komunitas kembali ke Node ID
+        communities = {}
+        for comm_id, members in enumerate(partition):
+            for idx in members:
+                node_id = reverse_mapping[idx]
+                communities[node_id] = comm_id
+
+        # --- 5. SUSUN HASIL JSON ---
+        nodes_result = []
+        for node in G.nodes():
+            nodes_result.append({
+                "id": node,
+                "label": G.nodes[node].get('label'),
+                "community": communities.get(node, 0),
+                "metrics": {
+                    "degree": degree.get(node, 0),
+                    "betweenness": betweenness.get(node, 0),
+                    "closeness": closeness.get(node, 0),
+                    "eigenvector": eigenvector.get(node, 0)
+                }
+            })
+
+        edges_result = []
+        for u, v in G.edges():
+            edges_result.append({
+                "source": u,
+                "target": v,
+                "weight": G[u][v]['weight']
+            })
+
+        # Urutkan Top Influencer berdasarkan Betweenness
+        top_influencers = sorted(
+            nodes_result, 
+            key=lambda x: x['metrics']['betweenness'], 
+            reverse=True
+        )[:10]
+
+        return {
+            "meta": {
+                "total_nodes": G.number_of_nodes(),
+                "total_edges": G.number_of_edges(),
+                "total_communities": len(partition)
+            },
+            "top_influencers": top_influencers,
+            "graph_data": {
+                "nodes": nodes_result,
+                "edges": edges_result
+            }
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Gagal melakukan analisis SNA Firestore: {str(e)}")

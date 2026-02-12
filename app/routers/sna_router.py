@@ -24,9 +24,15 @@ def get_sna_dataset_endpoint():
     """
     return sna_controller.get_dataset_flat()
 
-@router.get("/visualize/{metric}")
-def visualize_graph_endpoint(metric: Literal['degree', 'betweenness', 'closeness', 'eigenvector']):
+@router.get("/firestore/analyze")
+async def analyze_firestore_endpoint():
     """
-    Membuat file HTML visualisasi SNA berdasarkan data yang sudah di-ingest.
+    Melakukan Social Network Analysis (SNA) pada data real-time Firestore.
+    Sumber Data: Koleksi 'user', 'kawanss', 'kawanssLikes', 'kawanssComments'.
+    
+    Output:
+    - Metrik Centrality (Degree, Betweenness, Closeness, Eigenvector)
+    - Deteksi Komunitas (Leiden Algorithm)
+    - Struktur Graf (Nodes & Edges) untuk visualisasi Frontend
     """
-    return sna_controller.generate_sna_html(metric_type=metric)
+    return await sna_controller.analyze_firestore_network()
