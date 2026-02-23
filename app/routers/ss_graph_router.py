@@ -5,7 +5,7 @@ router = APIRouter(
     tags=["SS Graph (Firestore)"]
 )
 
-@router.get("/ssgraph")
+@router.get("/snagraph")
 async def create_ss_graph_endpoint():
     """
     Endpoint untuk membuat graf dari koleksi 'users' dan 'kawanss' di Firestore.

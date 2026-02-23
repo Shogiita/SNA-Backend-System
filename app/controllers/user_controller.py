@@ -27,7 +27,7 @@ async def get_all_users_from_db():
     """Logika untuk mengambil semua pengguna dari koleksi 'users'."""
     try:
         users_list = []
-        docs_stream = db.collection('users').stream()
+        docs_stream = db.collection('users').select(['nama']).stream()
         docs = await asyncio.to_thread(list, docs_stream)
         
         for doc in docs:
