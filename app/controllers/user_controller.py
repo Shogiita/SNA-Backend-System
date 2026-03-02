@@ -23,11 +23,17 @@ async def get_user_by_id(user_id: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-async def get_all_users_from_db():
-    """Logika untuk mengambil semua pengguna dari koleksi 'users'."""
+async def get_all_users_from_db(limit: int = None):
+    """Logika untuk mengambil pengguna dari koleksi 'users'."""
     try:
         users_list = []
-        docs_stream = db.collection('users').select(['nama']).stream()
+        # Pengambilan SANGAT CEPAT karena hanya minta 1 kolom (nama)
+        query = db.collection('users').select(['nama'])
+        
+        if limit:
+            query = query.limit(limit)
+            
+        docs_stream = query.stream()
         docs = await asyncio.to_thread(list, docs_stream)
         
         for doc in docs:

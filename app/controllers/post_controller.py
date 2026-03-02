@@ -1,13 +1,17 @@
-    
 import asyncio
 from fastapi import HTTPException
 from app.database import db
 
-async def get_all_posts_from_db():
-    """Logika untuk mengambil semua post dari koleksi 'kawanss'."""
+async def get_all_posts_from_db(limit: int = None):
+    """Logika untuk mengambil post dari koleksi 'kawanss'."""
     try:
         posts_list = []
-        docs_stream = db.collection('kawanss').stream()
+        query = db.collection('kawanss')
+        
+        if limit:
+            query = query.limit(limit)
+            
+        docs_stream = query.stream()
         docs = await asyncio.to_thread(list, docs_stream)
         
         for doc in docs:
