@@ -1,30 +1,18 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional
-from app.controllers import firestore_graph_controller
+from app.controllers import neo4j_graph_controller
 
 router = APIRouter(
-    tags=["SS Graph (Firestore)"]
+    tags=["SS Graph (Neo4j)"]
 )
 
 class GraphLimitRequest(BaseModel):
-    user_limit: Optional[int] = 100  
-    post_limit: Optional[int] = 500  
-
+    limit: Optional[int] = 1000
 @router.post("/snagraph")
 async def create_ss_graph_endpoint(req: GraphLimitRequest):
     """
-    Endpoint untuk membuat graf SNA terhubung dengan batas user dan post.
+    Endpoint untuk membuat graf SNA terhubung beserta metriknya (Degree, Betweenness, dll)
+    bersumber LANGSUNG dari Neo4j Graph Database.
     """
-    return await firestore_graph_controller.create_graph_from_firestore(
-        user_limit=req.user_limit,
-        post_limit=req.post_limit
-    )
-
-@router.get("/ssgraph/pajek")
-async def create_ss_graph_pajek_endpoint():
-    """
-    Endpoint untuk membuat graf dari koleksi 'users' dan 'kawanss' di Firestore
-    dalam format Pajek (.net).
-    """
-    return await firestore_graph_controller.create_graph_from_firestore_pajek()
+    return await neo4j_graph_controller.create_graph_from_neo4j(limit=req.limit)

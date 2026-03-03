@@ -123,38 +123,3 @@ async def create_graph_from_firestore(user_limit: int = 100, post_limit: int = 5
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
         
-async def create_graph_from_firestore_pajek():
-    """
-    Logika untuk membangun graf dari koleksi 'users' dan 'kawanss' di Firestore Pajek.
-    """
-    try:
-        users_task = user_controller.get_all_users_from_db()
-        posts_task = post_controller.get_all_posts_from_db()
-        users, posts = await asyncio.gather(users_task, posts_task)
-
-        if not posts:
-            raise HTTPException(status_code=404, detail="Tidak ada data post di koleksi 'kawanss' untuk membuat graf.")
-
-        G = nx.DiGraph()
-
-        for user in users:
-            user_name = user.get('nama')
-            if user_name:
-                G.add_node(f"user_{user_name}", type="user", name=user_name)
-
-        for post in posts:
-            post_id = post.get('id')
-            author_name = post.get('accountName')
-            if post_id:
-                G.add_node(f"post_{post_id}", type="post", author=author_name)
-                if author_name and G.has_node(f"user_{author_name}"):
-                    G.add_edge(f"user_{author_name}", f"post_{post_id}")
-                
-                reply_to_id = post.get('reply_to_id')
-                if reply_to_id and G.has_node(f"post_{reply_to_id}"):
-                    G.add_edge(f"post_{post_id}", f"post_{reply_to_id}")
-
-        pajek_output = _format_to_pajek(G)
-        return Response(content=pajek_output, media_type="text/plain")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gagal memproses graf dari Firestore untuk Pajek: {str(e)}")
