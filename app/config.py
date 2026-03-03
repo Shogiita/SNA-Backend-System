@@ -11,6 +11,12 @@ IG_APP_ID = os.getenv("INSTAGRAM_APP_ID")
 IG_APP_SECRET = os.getenv("INSTAGRAM_APP_SECRET")
 IG_USERNAME = os.getenv("INSTAGRAM_USERNAME")
 
+NEO4J_URI = os.getenv("NEO4J_URI")
+NEO4J_USER = os.getenv("NEO4J_USER")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+NEO4J_API_URL = os.getenv("NEO4J_API_URL")
+NEO4J_ID = os.getenv("NEO4J_ID")
+
 # --- Konfigurasi API Graph ---
 # Sebaiknya tentukan versi API agar tetap stabil
 GRAPH_API_VERSION = "v19.0" 

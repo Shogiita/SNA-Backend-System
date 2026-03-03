@@ -11,3 +11,4 @@ scikit-learn
 requests
 python-dateutil
 pyvis
+neo4j

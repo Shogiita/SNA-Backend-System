@@ -10,7 +10,8 @@ from app.routers import (
     auth_router,
     instagram_router,
     sna_router,
-    report_router 
+    report_router,
+    neo4j_router
 )
 
 app = FastAPI(
@@ -37,6 +38,7 @@ app.include_router(auth_router.router)
 app.include_router(instagram_router.router)
 app.include_router(sna_router.router)
 app.include_router(report_router.router)
+app.include_router(neo4j_router.router) 
 
 @app.get("/")
 def read_root():

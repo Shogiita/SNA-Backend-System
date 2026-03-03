@@ -16,6 +16,7 @@ def _format_to_pajek(graph: nx.Graph) -> str:
 
 async def create_graph_from_firestore(user_limit: int = 100, post_limit: int = 500):
     try:
+        # 1. Ambil Post dari database dengan Limit
         posts = await post_controller.get_all_posts_from_db(limit=post_limit)
 
         if not posts:
@@ -26,8 +27,10 @@ async def create_graph_from_firestore(user_limit: int = 100, post_limit: int = 5
             if p.get('accountName') and p.get('accountName').strip().lower() != "unknown user"
         }
 
+        # 2. Ambil User
         all_users = await user_controller.get_all_users_from_db(limit=None)
 
+        # 3. Filtering Cepat
         matched_users = []
         for user in all_users:
             if user.get('nama') in active_authors:
@@ -35,6 +38,7 @@ async def create_graph_from_firestore(user_limit: int = 100, post_limit: int = 5
                 if len(matched_users) >= user_limit:
                     break
 
+        # 4. Bangun Graf
         G = nx.DiGraph()
         user_lookup = {} 
         
@@ -72,17 +76,45 @@ async def create_graph_from_firestore(user_limit: int = 100, post_limit: int = 5
 
         G.add_edges_from(edges_to_add)
 
+        # 5. Bersihkan sisa node tanpa relasi
         G.remove_nodes_from(list(nx.isolates(G)))
 
         if G.number_of_nodes() == 0:
             return {"message": "Tidak ada relasi edge yang terbentuk."}
+
+        # === 6. PERHITUNGAN CENTRALITY METRICS ===
+        
+        degree_cent = nx.degree_centrality(G)
+        betweenness_cent = nx.betweenness_centrality(G)
+        closeness_cent = nx.closeness_centrality(G)
+        
+        # Eigenvector Centrality kadang gagal konvergen (Error) jika graf tidak terhubung sempurna 
+        # (misal grafnya berbentuk pohon/terputus). Kita gunakan try-except untuk mencegah API crash.
+        try:
+            eigenvector_cent = nx.eigenvector_centrality(G, max_iter=1000)
+        except nx.PowerIterationFailedConvergence:
+            eigenvector_cent = {n: 0.0 for n in G.nodes()} # Default 0 jika gagal konvergen
+
+        # Susun ulang JSON Node agar menyertakan object "metrics"
+        nodes_output = []
+        for n in G.nodes():
+            nodes_output.append({
+                "id": n,
+                "attributes": G.nodes[n],
+                "metrics": {
+                    "degree": degree_cent.get(n, 0.0),
+                    "betweenness": betweenness_cent.get(n, 0.0),
+                    "closeness": closeness_cent.get(n, 0.0),
+                    "eigenvector": eigenvector_cent.get(n, 0.0)
+                }
+            })
 
         return {
             "message": f"Graf berhasil dibuat (Limit: {user_limit} User, {post_limit} Post).",
             "graph_info": {
                 "nodes_count": G.number_of_nodes(),
                 "edges_count": G.number_of_edges(),
-                "nodes": [{"id": n, "attributes": G.nodes[n]} for n in G.nodes()],
+                "nodes": nodes_output,
                 "edges": [{"source": u, "target": v, "attributes": G.edges[u, v]} for u, v in G.edges()]
             }
         }
