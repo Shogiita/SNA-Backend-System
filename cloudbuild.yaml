@@ -26,13 +26,13 @@ steps:
       - "--image"
       - "gcr.io/$PROJECT_ID/sna-backend-api:$SHORT_SHA"
       - "--region"
-      - "asia-southeast2" # Ganti jika region Anda berbeda (misal: asia-southeast1 untuk Singapura)
+      - "asia-southeast2"
       - "--platform"
       - "managed"
       - "--allow-unauthenticated"
       # Menggunakan substitusi variabel untuk Environment Variables (agar tidak hardcode di file)
       - "--set-env-vars"
-      - "INSTAGRAM_BUSINESS_ACCOUNT_ID=$_IG_BIZ_ID,INSTAGRAM_ACCESS_TOKEN=$_IG_TOKEN,INSTAGRAM_APP_ID=$_IG_APP_ID,INSTAGRAM_APP_SECRET=$_IG_APP_SECRET,INSTAGRAM_USERNAME=$_IG_USERNAME"
+      - "INSTAGRAM_BUSINESS_ACCOUNT_ID=$_IG_BIZ_ID,INSTAGRAM_ACCESS_TOKEN=$_IG_TOKEN,INSTAGRAM_APP_ID=$_IG_APP_ID,INSTAGRAM_APP_SECRET=$_IG_APP_SECRET,INSTAGRAM_USERNAME=$_IG_USERNAME,NEO4J_URI=$_NEO4J_URI,NEO4J_USER=$_NEO4J_USER,NEO4J_PASSWORD=$_NEO4J_PASSWORD"
 
 # Memberitahu Cloud Build image mana yang dihasilkan dari proses ini
 images:
