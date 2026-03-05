@@ -13,3 +13,8 @@ async def start_migration_streaming():
     di dalam body response saat di-hit.
     """
     return await neo4j_migration_controller.run_migration_streaming()
+
+# ENDPOINT BARU UNTUK MENGHAPUS SEMUA DATA
+@router.delete("/clear-all")
+async def clear_all_neo4j_data():
+    return await neo4j_migration_controller.delete_all_neo4j_data()

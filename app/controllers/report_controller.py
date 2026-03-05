@@ -1,115 +1,106 @@
-from firebase_admin import firestore
-from google.cloud.firestore import FieldFilter
 from datetime import datetime, timedelta
 import networkx as nx
+from app.database import neo4j_driver
 
-db = firestore.client()
+def get_first_day_of_last_month(dt):
+    if dt.month == 1:
+        return dt.replace(year=dt.year-1, month=12, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        return dt.replace(month=dt.month-1, day=1, hour=0, minute=0, second=0, microsecond=0)
 
 def get_main_dashboard_summary():
     """
-    Mengambil data statistik internal dari Firestore:
-    - User Growth
-    - Post Stats
-    - Top 10 Content (Menggunakan field 'jumlahView' dan 'judul')
-    - Top 10 Centrality (Degree, Betweenness, Closeness, Eigenvector)
+    Mengambil data statistik dari Neo4j.
+    Menghitung metrik Centrality (Degree, Betweenness, Closeness, Eigenvector) 
+    secara real-time menggunakan NetworkX dari sampel data graf Neo4j.
     """
     try:
         now = datetime.now()
-        
-        # --- 1. Statistik Users ---
-        users_ref = db.collection('users')
-        total_users_snapshot = users_ref.count().get()
-        total_users = total_users_snapshot[0][0].value
-
         first_day_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        last_month = first_day_this_month - timedelta(days=1)
-        first_day_last_month = last_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        
-        new_users_this_month = len(users_ref.where(
-            filter=FieldFilter('joinDate', '>=', first_day_this_month)
-        ).get())
-        
-        new_users_last_month = len(users_ref.where(
-            filter=FieldFilter('joinDate', '>=', first_day_last_month)
-        ).where(
-            filter=FieldFilter('joinDate', '<', first_day_this_month)
-        ).get())
-        
-        user_growth_percent = 0
-        if new_users_last_month > 0:
-            user_growth_percent = (new_users_this_month / new_users_last_month) * 100
-        else:
-            user_growth_percent = 100.0 if new_users_this_month > 0 else 0.0
-
-        # --- 2. Statistik Posts ---
-        posts_ref = db.collection('infoss')
-        total_posts = posts_ref.count().get()[0][0].value
-        
+        first_day_last_month = get_first_day_of_last_month(now)
         thirty_days_ago = now - timedelta(days=30)
-        new_posts_30d = len(posts_ref.where(
-            filter=FieldFilter('uploadDate', '>=', thirty_days_ago)
-        ).get())
 
-        top_posts_query = posts_ref.order_by('jumlahView', direction=firestore.Query.DESCENDING).limit(10).stream()
+        iso_this_month = first_day_this_month.isoformat()
+        iso_last_month = first_day_last_month.isoformat()
+        iso_30_days_ago = thirty_days_ago.isoformat()
 
-        kawan_ss_post = db.collection('kawanss')
+        # 1. QUERY STATISTIK (Sangat Cepat)
+        stats_query = """
+        CALL { MATCH (u:User) RETURN count(u) AS total_users }
+        CALL { MATCH (i:Infoss) RETURN count(i) AS total_infoss }
+        CALL { MATCH (k:KawanSS) RETURN count(k) AS total_kawanss }
+        CALL { MATCH (u_this:User) WHERE u_this.createdAt >= $iso_this_month OR u_this.joinDate >= $iso_this_month RETURN count(u_this) AS new_users_this_month }
+        CALL { MATCH (u_last:User) WHERE (u_last.createdAt >= $iso_last_month AND u_last.createdAt < $iso_this_month) OR (u_last.joinDate >= $iso_last_month AND u_last.joinDate < $iso_this_month) RETURN count(u_last) AS new_users_last_month }
+        CALL { MATCH (i_30:Infoss) WHERE i_30.uploadDate >= $iso_30_days_ago OR i_30.createdAt >= $iso_30_days_ago RETURN count(i_30) AS new_infoss_30_days }
+        CALL { MATCH (k_30:KawanSS) WHERE k_30.uploadDate >= $iso_30_days_ago OR k_30.createdAt >= $iso_30_days_ago RETURN count(k_30) AS new_kawanss_30_days }
+        RETURN total_users, total_infoss, total_kawanss, new_users_this_month, new_users_last_month, new_infoss_30_days, new_kawanss_30_days
+        """
 
-        thirty_days_ago_kawanss = now - timedelta(days=30)
-        new_posts_30d_kawanss = len(kawan_ss_post.where(
-            filter=FieldFilter('uploadDate', '>=', thirty_days_ago_kawanss)
-        ).get())
+        # 2. QUERY TOP CONTENT
+        top_content_query = """
+        MATCH (i:Infoss)
+        RETURN i.id AS id, 
+               coalesce(i.judul, i.title, 'No Title') AS judul, 
+               coalesce(toInteger(i.jumlahView), 0) AS jumlahView, 
+               coalesce(i.kategori, 'Umum') AS kategori, 
+               coalesce(i.gambar, '') AS gambar, 
+               i.uploadDate AS uploadDate, 
+               coalesce(toInteger(i.jumlahComment), 0) AS jumlahComment, 
+               coalesce(toInteger(i.jumlahLike), 0) AS jumlahLike
+        ORDER BY jumlahView DESC
+        LIMIT 10
+        """
 
-        total_kawanss = len(kawan_ss_post.get())
+        # 3. QUERY SNA (Menarik 500 relasi terbaru dari database untuk dihitung)
+        sna_query = """
+        MATCH (u:User)-[r]->(p)
+        WHERE type(r) IN ['POSTED', 'WROTE']
+        RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, p.id AS pid
+        LIMIT 500
+        """
+
+        with neo4j_driver.session() as session:
+            stats_res = session.run(stats_query, 
+                iso_this_month=iso_this_month, 
+                iso_last_month=iso_last_month, 
+                iso_30_days_ago=iso_30_days_ago
+            ).single()
+            
+            top_content_res = session.run(top_content_query).data()
+            sna_records = session.run(sna_query).data()
+
+        # Proses Data Pertumbuhan Pengguna
+        total_users = stats_res["total_users"]
+        new_this_month = stats_res["new_users_this_month"]
+        new_last_month = stats_res["new_users_last_month"]
         
-        top_posts = []
-        for doc in top_posts_query:
-            data = doc.to_dict()
-            top_posts.append({
-                "id": doc.id,
-                "judul": data.get('judul', data.get('title', 'No Title')),
-                "jumlahView": data.get('jumlahView', 0),
-                "kategori": data.get('kategori', 'Umum'),
-                "gambar": data.get('gambar', ''),
-                "uploadDate": data.get('uploadDate').isoformat() if data.get('uploadDate') else None,
-                "jumlahComment": data.get('jumlahComment', 0),
-                "jumlahLike": data.get('jumlahLike', 0)
-            })
+        user_growth_percent = 0.0
+        if new_last_month > 0:
+            user_growth_percent = (new_this_month / new_last_month) * 100
+        else:
+            user_growth_percent = 100.0 if new_this_month > 0 else 0.0
 
-        # --- 3. SNA (Top 10 Centrality) Fast Calculation ---
+        # ==========================================
+        # PERHITUNGAN SNA REAL-TIME DENGAN NETWORKX
+        # ==========================================
         top_10_centrality = []
         try:
-            # Mengambil 500 post terbaru untuk memastikan dashboard tetap loading cepat
-            recent_kawanss = kawan_ss_post.order_by('uploadDate', direction=firestore.Query.DESCENDING).limit(500).stream()
-            
             G = nx.DiGraph()
-            post_map = {}
-            valid_posts = []
             
-            for doc in recent_kawanss:
-                data = doc.to_dict()
-                pid = doc.id
-                author = data.get('accountName')
+            # Bangun graf dari data Neo4j
+            for record in sna_records:
+                u_node = f"user_{record['uid']}"
+                p_node = f"post_{record['pid']}"
                 
-                if not author or author.strip().lower() == "unknown user":
-                    continue
-                    
-                post_map[pid] = author
-                valid_posts.append((pid, data))
-                
-                u_node = f"user_{author}"
-                p_node = f"post_{pid}"
-                G.add_node(u_node, type="user", name=author)
+                G.add_node(u_node, type="user", name=record['uname'])
                 G.add_node(p_node, type="post")
-                G.add_edge(u_node, p_node, relation="AUTHORED")
-                
-            for pid, data in valid_posts:
-                reply_to_id = data.get('reply_to_id')
-                if reply_to_id and reply_to_id in post_map:
-                    G.add_edge(f"post_{pid}", f"post_{reply_to_id}", relation="REPLIED_TO")
-                    
+                G.add_edge(u_node, p_node, relation="INTERACTED")
+
+            # Hapus node yang tidak memiliki relasi
             G.remove_nodes_from(list(nx.isolates(G)))
-            
+
             if G.number_of_nodes() > 0:
+                # Kalkulasi nilai asli tanpa hardcode
                 deg_cent = nx.degree_centrality(G)
                 bet_cent = nx.betweenness_centrality(G)
                 clo_cent = nx.closeness_centrality(G)
@@ -117,13 +108,13 @@ def get_main_dashboard_summary():
                     eig_cent = nx.eigenvector_centrality(G, max_iter=1000)
                 except nx.PowerIterationFailedConvergence:
                     eig_cent = {n: 0.0 for n in G.nodes()}
-                    
-                # Filter hanya node bertipe user
+
+                # Filter khusus node User
                 user_nodes = [n for n, attr in G.nodes(data=True) if attr.get('type') == 'user']
                 
-                # Urutkan berdasarkan Degree Centrality tertinggi (Top 10)
+                # Ambil 10 teratas berdasarkan Degree
                 top_users = sorted(user_nodes, key=lambda x: deg_cent.get(x, 0.0), reverse=True)[:10]
-                
+
                 for u in top_users:
                     top_10_centrality.append({
                         "id": u,
@@ -132,46 +123,45 @@ def get_main_dashboard_summary():
                             "degree": deg_cent.get(u, 0.0),
                             "betweenness": bet_cent.get(u, 0.0),
                             "closeness": clo_cent.get(u, 0.0),
-                            "eigenvector": eig_cent.get(u, 0.0)
+                            "eigenvector": eig_cent.get(u, 0.0) # NILAI ASLI
                         }
                     })
         except Exception as sna_err:
             print(f"SNA Calculation error on dashboard: {sna_err}")
 
-        # --- 4. Integrations ---
-        integrations = {
-            "google_sheets": {
-                "status": "connected",
-                "last_sync": datetime.now().isoformat()
-            },
-            "google_analytics": {
-                "status": "connected",
-                "active_users_now": 0
-            }
-        }
-
+        # Return format final
         return {
             "status": "success",
             "data": {
                 "users": {
                     "total": total_users,
-                    "total_post": total_posts,
-                    "total_post_kawanss": total_kawanss,
-                    "new_this_month": new_users_this_month,
-                    "new_last_month": new_users_last_month,
+                    "total_post": stats_res["total_infoss"],
+                    "total_post_kawanss": stats_res["total_kawanss"],
+                    "new_this_month": new_this_month,
+                    "new_last_month": new_last_month,
                     "growth_percentage": round(user_growth_percent, 2),
                 },
                 "posts": {
-                    "total": total_posts,
-                    "new_30_days": new_posts_30d,
-                    "total_kawn_ss": total_kawanss,
-                    "new_30_days_kawanss": new_posts_30d_kawanss
+                    "total": stats_res["total_infoss"],
+                    "new_30_days": stats_res["new_infoss_30_days"],
+                    "total_kawn_ss": stats_res["total_kawanss"],
+                    "new_30_days_kawanss": stats_res["new_kawanss_30_days"]
                 },
-                "top_content": top_posts,
-                "top_10_centrality": top_10_centrality, # <--- DATA CENTRALITY DIMASUKKAN DI SINI
-                "integrations": integrations
+                "top_content": top_content_res,
+                "top_10_centrality": top_10_centrality,
+                "integrations": {
+                    "google_sheets": {
+                        "status": "connected",
+                        "last_sync": datetime.now().isoformat()
+                    },
+                    "google_analytics": {
+                        "status": "connected",
+                        "active_users_now": 0
+                    }
+                }
             }
         }
+        
     except Exception as e:
         import traceback
         traceback.print_exc()
