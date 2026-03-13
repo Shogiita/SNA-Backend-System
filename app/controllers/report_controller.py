@@ -2,10 +2,55 @@ import os
 import json
 import csv
 import io
+import re
 from datetime import datetime, timedelta
 import networkx as nx
 from fastapi import HTTPException, Response
 from app.database import neo4j_driver
+from collections import Counter
+
+def get_top_10_hashtags():
+    """
+    Mengambil Top 10 Hashtag yang digunakan oleh user dari postingan di Neo4j.
+    Disempurnakan sesuai dengan skema Infoss (detail, judul, title) 
+    dan KawanSS (deskripsi, title).
+    """
+    
+    query = """
+    MATCH (u:User)-[:POSTED|AUTHORED]->(p)
+    WHERE p:KawanSS OR p:Infoss
+    WITH coalesce(p.detail, p.deskripsi, p.judul, p.title, '') AS text
+    WHERE text CONTAINS '#'
+    RETURN text
+    """
+    
+    try:
+        with neo4j_driver.session() as session:
+            records = session.run(query).data()
+
+        all_hashtags = []
+        hashtag_pattern = re.compile(r'#\w+')
+
+        for r in records:
+            text = r['text']
+            if text:
+                tags = hashtag_pattern.findall(text.lower())
+                all_hashtags.extend(tags)
+
+        top_10 = Counter(all_hashtags).most_common(10)
+
+        result = [{"hashtag": tag, "count": count} for tag, count in top_10]
+
+        return {
+            "status": "success",
+            "message": "Top 10 Hashtags berhasil diambil",
+            "data": result
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil top hashtags: {str(e)}")
 
 def get_first_day_of_last_month(dt):
     if dt.month == 1:

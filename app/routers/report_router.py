@@ -37,3 +37,11 @@ async def export_instagram_endpoint():
     Harap pastikan endpoint /sna/ingest sudah pernah dijalankan sebelumnya.
     """
     return await report_controller.export_instagram_to_csv()
+
+@router.get("/top-hashtags")
+def get_top_hashtags_endpoint():
+    """
+    Endpoint untuk mendapatkan daftar Top 10 Hashtag yang paling 
+    sering digunakan pada postingan pengguna.
+    """
+    return report_controller.get_top_10_hashtags()
