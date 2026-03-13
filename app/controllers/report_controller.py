@@ -132,14 +132,17 @@ def get_main_dashboard_summary():
         
         sna_query = """
         MATCH (u:User)-[:POSTED]->(p:KawanSS)
+        WHERE u.id <> 'unknown_user' AND toLower(coalesce(u.nama, u.username, '')) <> 'unknown' AND toLower(coalesce(u.nama, u.username, '')) <> 'unknown user'
         RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, p.id AS pid
         LIMIT 500
         UNION ALL
         MATCH (u:User)-[:WROTE]->(c:KawanssComment)-[:COMMENTED_ON]->(p:KawanSS)
+        WHERE u.id <> 'unknown_user' AND toLower(coalesce(u.nama, u.username, '')) <> 'unknown' AND toLower(coalesce(u.nama, u.username, '')) <> 'unknown user'
         RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, p.id AS pid
         LIMIT 500
         UNION ALL
         MATCH (u:User)-[:WROTE]->(c:InfossComment)-[:COMMENTED_ON]->(p:Infoss)
+        WHERE u.id <> 'unknown_user' AND toLower(coalesce(u.nama, u.username, '')) <> 'unknown' AND toLower(coalesce(u.nama, u.username, '')) <> 'unknown user'
         RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, p.id AS pid
         LIMIT 500
         """
@@ -172,10 +175,16 @@ def get_main_dashboard_summary():
         try:
             G = nx.Graph()
             for record in sna_records:
+                uid = str(record['uid']).strip().lower()
+                uname = str(record['uname']).strip().lower()
+                
+                if uid == 'unknown_user' or uname in ['unknown', 'unknown user', 'unknown_user']:
+                    continue  
+
                 u_node = f"user_{record['uid']}"
                 p_node = f"post_{record['pid']}"
                 G.add_node(u_node, type="user", name=record['uname'])
-                G.add_node(p_node, type="post")
+                G.add_node(p_node, type="post")       
                 if G.has_edge(u_node, p_node):
                     G[u_node][p_node]['weight'] += 1
                 else:
@@ -184,12 +193,17 @@ def get_main_dashboard_summary():
             G.remove_nodes_from(list(nx.isolates(G)))
 
             if G.number_of_nodes() > 0:
+                for u, v, d in G.edges(data=True):
+                    d['distance'] = 1.0 / d['weight'] if d['weight'] > 0 else 1.0
+
                 deg_cent = nx.degree_centrality(G)
                 k_samples = min(100, G.number_of_nodes())
-                bet_cent  = nx.betweenness_centrality(G, weight='weight', k=k_samples)
-                clo_cent  = nx.closeness_centrality(G)
+                
+                bet_cent  = nx.betweenness_centrality(G, weight='distance', k=k_samples)
+                clo_cent  = nx.closeness_centrality(G, distance='distance')
+                
                 try:
-                    eig_cent = nx.eigenvector_centrality(G, weight='weight', max_iter=500)
+                    eig_cent = nx.eigenvector_centrality(G, weight='weight', max_iter=1000)
                 except Exception:
                     eig_cent = nx.pagerank(G, weight='weight')
 
