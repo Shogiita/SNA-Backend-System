@@ -26,6 +26,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],  
     allow_headers=["*"],  
+    expose_headers=["X-Process-Time"], 
 )
 
 app.include_router(csv_graph_router.router)
@@ -42,4 +43,4 @@ app.include_router(neo4j_router.router)
 
 @app.get("/")
 def read_root():
-    return {"message": "SNA Backend System is running with CORS Enabled!"}
+    return {"message": "SNA Backend System is running with CORS Enabled for Flutter!"}

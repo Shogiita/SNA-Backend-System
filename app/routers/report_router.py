@@ -18,13 +18,22 @@ def get_main_dashboard():
 def get_google_analytics_data():
     """
     Data External dari Google Analytics.
-    Pisahkan request ini di Frontend agar tidak memblokir loading dashboard utama.
     """
     return report_controller.get_analytics_summary()
 
-@router.post("/export/sheets")
-def export_data_to_sheets():
+@router.get("/export/csv/neo4j")
+async def export_neo4j_endpoint():
     """
-    Trigger untuk export data ke Google Sheets.
+    Download file CSV berisi data statistik relasi user dari database Neo4j.
+    Gunakan metode GET agar file langsung terunduh saat URL dibuka.
     """
-    return report_controller.export_to_google_sheets()
+    return await report_controller.export_neo4j_to_csv()
+
+@router.get("/export/csv/instagram")
+async def export_instagram_endpoint():
+    """
+    Download file CSV berisi data hasil crawling Instagram dari cache internal.
+    Gunakan metode GET agar file langsung terunduh saat URL dibuka.
+    Harap pastikan endpoint /sna/ingest sudah pernah dijalankan sebelumnya.
+    """
+    return await report_controller.export_instagram_to_csv()
