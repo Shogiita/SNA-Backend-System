@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 from app.controllers import neo4j_migration_controller
 
 router = APIRouter(
@@ -6,15 +7,17 @@ router = APIRouter(
     tags=["Neo4j Migration"]
 )
 
-@router.post("/migrate")
+@router.get("/migrate")
 async def start_migration_streaming():
     """
-    Endpoint ini akan menampilkan progress langsung (1/50000, 2/50000, dst)
-    di dalam body response saat di-hit.
+    Endpoint SSE untuk Frontend.
+    Gunakan EventSource("http://url/neo4j/migrate") di JS/Flutter untuk membaca progress.
     """
-    return await neo4j_migration_controller.run_migration_streaming()
+    return StreamingResponse(
+        neo4j_migration_controller.run_migration_streaming(),
+        media_type="text/event-stream"
+    )
 
-# ENDPOINT BARU UNTUK MENGHAPUS SEMUA DATA
 @router.delete("/clear-all")
 async def clear_all_neo4j_data():
     return await neo4j_migration_controller.delete_all_neo4j_data()

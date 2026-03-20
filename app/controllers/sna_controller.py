@@ -1,15 +1,12 @@
 import requests
 import json
 import time
+import os
+import pandas as pd
 import networkx as nx
 import leidenalg as la
 import igraph as ig
 import concurrent.futures
-import textwrap
-import os
-import glob
-import re
-import pandas as pd
 from datetime import datetime, timezone
 from dateutil.relativedelta import relativedelta
 from dateutil import parser
@@ -17,23 +14,91 @@ from pyvis.network import Network
 from fastapi import HTTPException
 from fastapi.responses import HTMLResponse, Response
 from app import config
-from app.database import neo4j_driver # Menggunakan Neo4j
+from app.database import neo4j_driver
+import re
+from collections import Counter
 
 CACHE_FILE = "instagram_data_cache.json"
 OUTPUT_HTML_DIR = "generated_graphs"
 
-MAX_POSTS_TO_FETCH = 10000
+MAX_POSTS_TO_FETCH = 1000
 FETCH_MONTHS_BACK = 12
-MAX_WORKERS = 20
+MAX_WORKERS = 10
 
 os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
 session = requests.Session()
 
-# ==================================================
-# INSTAGRAM INGESTION LOGIC
-# ==================================================
+def get_sna_metrics():
+    """
+    Mengambil Top 10 Posts dan Top 10 Hashtags murni dari data Instagram.
+    """
+    # 1. Cek ketersediaan file cache
+    if not os.path.exists(CACHE_FILE):
+        raise HTTPException(
+            status_code=404, 
+            detail="Data cache belum ada. Silakan jalankan proses ingest terlebih dahulu."
+        )
+        
+    with open(CACHE_FILE, "r", encoding="utf-8") as f:
+        posts_data = json.load(f)
+
+    # ==========================================
+    # A. MENGAMBIL TOP 10 POSTS (Berdasarkan Total Interaksi)
+    # ==========================================
+    # Urutkan berdasarkan total likes + comments
+    sorted_posts = sorted(
+        posts_data, 
+        key=lambda x: x.get('like_count', 0) + x.get('comments_count', 0), 
+        reverse=True
+    )
+    
+    top_10_posts = []
+    for p in sorted_posts[:10]:
+        # Bersihkan caption dari enter untuk keperluan preview
+        clean_caption = p.get("caption", "").replace('\n', ' ').replace('\r', ' ')
+        # Ambil maksimal 100 karakter pertama
+        preview_caption = clean_caption[:100] + "..." if len(clean_caption) > 100 else clean_caption
+        
+        top_10_posts.append({
+            "id": p.get("id"),
+            "permalink": p.get("permalink", ""),
+            "caption": preview_caption,
+            "like_count": p.get("like_count", 0),
+            "comments_count": p.get("comments_count", 0),
+            "total_engagement": p.get("like_count", 0) + p.get("comments_count", 0),
+            "timestamp": p.get("timestamp", "")
+        })
+
+    # ==========================================
+    # B. MENGAMBIL TOP 10 HASHTAGS
+    # ==========================================
+    all_hashtags = []
+    for p in posts_data:
+        caption = p.get('caption', '')
+        if caption:
+            # Gunakan Regex untuk mengekstrak semua kata yang diawali dengan '#'
+            tags = re.findall(r"#(\w+)", caption.lower())
+            all_hashtags.extend(tags)
+            
+    hashtag_counts = Counter(all_hashtags)
+    # Mengambil 10 terbanyak dan diformat menjadi list of dictionary
+    top_10_hashtags = [
+        {"hashtag": f"#{tag}", "count": count} 
+        for tag, count in hashtag_counts.most_common(10)
+    ]
+
+    # ==========================================
+    # KEMBALIKAN SEMUA DATA
+    # ==========================================
+    return {
+        "status": "success",
+        "total_posts_analyzed": len(posts_data),
+        "data": {
+            "top_10_posts": top_10_posts,
+            "top_10_hashtags": top_10_hashtags
+        }
+    }
 def _get_posts_recursive(start_date, end_date, max_posts=MAX_POSTS_TO_FETCH):
-    # Logika Instagram Ingestion tetap sama
     all_posts = []
     url = f"{config.GRAPH_API_URL}/{config.IG_BUSINESS_ACCOUNT_ID}/media"
     params = {
@@ -46,8 +111,7 @@ def _get_posts_recursive(start_date, end_date, max_posts=MAX_POSTS_TO_FETCH):
         try:
             response = session.get(url, params=params)
             data = response.json()
-            if 'error' in data: break
-            if 'data' not in data: break
+            if 'error' in data or 'data' not in data: break
             
             stop_fetching = False
             for post in data['data']:
@@ -71,62 +135,159 @@ def _get_posts_recursive(start_date, end_date, max_posts=MAX_POSTS_TO_FETCH):
             break
     return all_posts
 
-def _fetch_comments_parallel(post):
+def _fetch_comments_and_replies(post):
     post_id = post['id']
     interactions = []
     post_item = {
-        "id": post_id, "caption": post.get('caption', ''), "media_url": post.get('media_url', ''),
-        "permalink": post.get('permalink', ''), "like_count": post.get('like_count', 0),
-        "timestamp": post.get('timestamp'), "interactions": []
+        "id": post_id, 
+        "caption": post.get('caption', ''), 
+        "media_url": post.get('media_url', ''),
+        "permalink": post.get('permalink', ''), 
+        "like_count": post.get('like_count', 0),
+        "comments_count": post.get('comments_count', 0),
+        "timestamp": post.get('timestamp'), 
+        "interactions": []
     }
-    if post.get('comments_count', 0) == 0: return post_item
+    
+    if post_item["comments_count"] == 0: 
+        return post_item
 
+    # Mengambil comment beserta replies-nya sekaligus
     url = f"{config.GRAPH_API_URL}/{post_id}/comments"
-    params = {"access_token": config.IG_ACCESS_TOKEN, "fields": "id,text,username,like_count,timestamp", "limit": 50}
+    params = {
+        "access_token": config.IG_ACCESS_TOKEN, 
+        "fields": "id,text,username,like_count,timestamp,replies{id,text,username,like_count,timestamp}", 
+        "limit": 50
+    }
+    
     try:
         resp = session.get(url, params=params)
         data = resp.json()
+        
         for comment in data.get('data', []):
+            comment_username = comment.get('username', 'Unknown')
+            # Tambahkan Data Komentar Utama
             interactions.append({
-                "id": comment.get('id'), "type": "COMMENT", "source_username": comment.get('username', 'Unknown'), 
-                "target_id": post_id, "content": comment.get('text', ''), "likes": comment.get('like_count', 0),
+                "interaction_type": "COMMENT",
+                "source_username": comment_username, 
+                "target_id": post_id,
+                "target_type": "POST",
+                "content": comment.get('text', ''), 
+                "likes": comment.get('like_count', 0),
                 "timestamp": comment.get('timestamp')
             })
-    except: pass
+            
+            # Cek jika ada balasan (replies) pada komentar ini
+            if 'replies' in comment:
+                for reply in comment['replies'].get('data', []):
+                    interactions.append({
+                        "interaction_type": "REPLY",
+                        "source_username": reply.get('username', 'Unknown'), 
+                        "target_id": comment_username, # Reply ditargetkan ke username pembuat komen
+                        "target_type": "USER",
+                        "content": reply.get('text', ''), 
+                        "likes": reply.get('like_count', 0),
+                        "timestamp": reply.get('timestamp')
+                    })
+    except Exception as e:
+        print(f"Error fetching comments for {post_id}: {e}")
+        
     post_item["interactions"] = interactions
     return post_item
 
-def run_ingestion_process():
-    end_date = datetime.now(timezone.utc)
-    start_date = end_date - relativedelta(months=FETCH_MONTHS_BACK)
-    raw_posts = _get_posts_recursive(start_date, end_date, max_posts=MAX_POSTS_TO_FETCH)
-    full_dataset = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(_fetch_comments_parallel, post): post for post in raw_posts}
-        for future in concurrent.futures.as_completed(futures):
-            try: full_dataset.append(future.result())
-            except: pass
-    with open(CACHE_FILE, "w") as f: json.dump(full_dataset, f)
-    return {"message": "Ingestion Selesai.", "total_posts_fetched": len(full_dataset)}
+def background_ingestion_task():
+    """Fungsi ini berjalan di background agar tidak memblokir response API"""
+    try:
+        print("[INGESTION] Memulai proses penarikan data dari Instagram...")
+        end_date = datetime.now(timezone.utc)
+        start_date = end_date - relativedelta(months=FETCH_MONTHS_BACK)
+        
+        raw_posts = _get_posts_recursive(start_date, end_date, max_posts=MAX_POSTS_TO_FETCH)
+        full_dataset = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(_fetch_comments_and_replies, post): post for post in raw_posts}
+            for future in concurrent.futures.as_completed(futures):
+                try: 
+                    full_dataset.append(future.result())
+                except Exception as e: 
+                    print(f"[INGESTION ERROR] {e}")
+                    
+        with open(CACHE_FILE, "w", encoding="utf-8") as f: 
+            json.dump(full_dataset, f, ensure_ascii=False, indent=2)
+            
+        print(f"[INGESTION] Selesai. Tersimpan {len(full_dataset)} posts ke cache.")
+    except Exception as e:
+        print(f"[FATAL ERROR] Ingestion gagal: {e}")
 
+# ==================================================
+# DATASET GENERATOR (SNA FORMAT)
+# ==================================================
 def get_dataset_flat():
-    if not os.path.exists(CACHE_FILE): raise HTTPException(status_code=404, detail="Cache belum ada.")
-    with open(CACHE_FILE, "r") as f: posts_data = json.load(f)
+    if not os.path.exists(CACHE_FILE): 
+        raise HTTPException(status_code=404, detail="Cache belum ada.")
+        
+    with open(CACHE_FILE, "r", encoding="utf-8") as f: 
+        posts_data = json.load(f)
+        
     dataset = []
+    
     for post in posts_data:
-        dataset.append({"type": "POST", "post_id": post['id'], "content": post.get('caption', '')})
-        for act in post['interactions']:
-            dataset.append({"type": act['type'], "post_id": post['id'], "user_id": act.get('source_username'), "content": act.get('content')})
+        post_id = post['id']
+        post_likes = post.get('like_count', 0)
+        post_comments_count = post.get('comments_count', 0)
+        
+        # Bersihkan caption dari enter agar tidak merusak CSV
+        clean_caption = post.get('caption', '').replace('\n', ' ').replace('\r', ' ').replace('"', "'")
+
+        # 1. Masukkan Node Utama (Postingan)
+        dataset.append({
+            "Source": "Suara_Surabaya_Official",
+            "Target": post_id,
+            "Interaction_Type": "POST",
+            "Post_Like_Count": post_likes,
+            "Post_Comment_Count": post_comments_count,
+            "Interaction_Like_Count": 0,
+            "Content": clean_caption
+        })
+
+        # 2. Proses Komentar dan Reply
+        for act in post.get('interactions', []):
+            interact_type = act.get('type') # COMMENT atau REPLY
+            source_user = act.get('source_username')
+            
+            # Jika dia komen, targetnya adalah ID Postingan. 
+            # Jika dia reply, targetnya adalah username yang dia balas.
+            target_id = act.get('target_id') 
+            
+            clean_content = act.get('content', '').replace('\n', ' ').replace('\r', ' ').replace('"', "'")
+            interact_likes = act.get('likes', 0)
+
+            dataset.append({
+                "Source": source_user,
+                "Target": target_id,
+                "Interaction_Type": interact_type,
+                "Post_Like_Count": post_likes,
+                "Post_Comment_Count": post_comments_count,
+                "Interaction_Like_Count": interact_likes,
+                "Content": clean_content
+            })
+            
+    # Buat DataFrame
     df = pd.DataFrame(dataset)
-    new_filename = "dataset_ss.csv"
-    df.to_csv(new_filename, index=False)
-    with open(new_filename, "r", encoding="utf-8") as f: csv_content = f.read()
-    return Response(content=csv_content, media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={new_filename}"})
-
-
-# ==================================================
-# NEO4J SNA LOGIC (1-MODE, 2-MODE, CLUSTERING, WEIGHTS)
-# ==================================================
+    new_filename = "dataset_sna_suarasurabaya.csv"
+    
+    # Simpan ke CSV dengan separator koma standar
+    df.to_csv(new_filename, index=False, encoding="utf-8")
+    
+    with open(new_filename, "r", encoding="utf-8") as f: 
+        csv_content = f.read()
+        
+    return Response(
+        content=csv_content, 
+        media_type="text/csv", 
+        headers={"Content-Disposition": f"attachment; filename={new_filename}"}
+    )
 
 def _build_neo4j_graph(mode: int):
     """
