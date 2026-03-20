@@ -7,15 +7,9 @@ router = APIRouter(
 )
 
 @router.get("/metrics")
-def get_sna_dashboard_metrics():
-    """
-    Mengembalikan data dashboard:
-    - Top 10 Postingan Instagram
-    - Top 10 Hashtag yang sering digunakan
-    - Aktor Paling Berpengaruh (Degree, Closeness, Betweenness, Eigenvector Centrality)
-    """
-    return sna_controller.get_sna_metrics()
-
+def get_sna_dashboard_metrics(background_tasks: BackgroundTasks):
+    return sna_controller.get_instagram_metrics(background_tasks)
+    
 @router.get("/ingest")
 async def run_ingestion_endpoint(background_tasks: BackgroundTasks):
     """
