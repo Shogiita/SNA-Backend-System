@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, Response
 from app import config
 from app.database import neo4j_driver
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from fastapi import HTTPException, BackgroundTasks
 from app.database import neo4j_driver
 
@@ -33,59 +33,75 @@ session = requests.Session()
 
 session = requests.Session()
 
-def get_instagram_metrics(background_tasks: BackgroundTasks):
+def get_instagram_metrics(background_tasks: BackgroundTasks, force_update: bool = False):
     query = """
-    MATCH (n:DashboardCache {id: 'instagram_metrics'}) 
+    MATCH (n:InstagramMetrics {id: 'latest_metrics'}) 
     RETURN n.top_posts AS top_posts, n.top_hashtags AS top_hashtags, n.last_updated AS last_updated
     """
     
-    result = []
     with neo4j_driver.session() as db_session:
         result = db_session.run(query).data()
         
     current_time = time.time()
     
-    if result:
+    # JIKA DATA ADA DAN TIDAK DIPAKSA UPDATE
+    if result and not force_update:
         data = result[0]
         last_updated = data.get("last_updated", 0)
         
-        # Load string JSON dari Neo4j kembali menjadi list/dictionary Python
+        # Load JSON
         top_posts = json.loads(data.get("top_posts", "[]"))
         top_hashtags = json.loads(data.get("top_hashtags", "[]"))
-        
-        # Cek apakah data sudah usang (Lebih dari 15 menit / 900 detik)
-        if current_time - last_updated > 900:
-            print("[CACHE] Data sudah lebih dari 15 menit. Memicu update background...")
-            # Panggil fungsi penarik data IG tanpa menyuruh user menunggu
+
+        # Cek apakah struktur hashtag sudah yang terbaru (punya top_posts)
+        # Jika belum ada top_posts di elemen pertama, maka paksa update
+        is_old_structure = False
+        if top_hashtags and "top_posts" not in top_hashtags[0]:
+            is_old_structure = True
+
+        if (current_time - last_updated > 900) or is_old_structure:
+            print("[IG CACHE] Struktur lama atau data usang. Menjalankan background sync...")
             background_tasks.add_task(_background_sync_ig_to_neo4j)
             
         return {
             "status": "success",
-            "message": "Data berhasil dimuat dari Cache Neo4j.",
-            "data": {
-                "top_10_posts": top_posts,
-                "top_10_hashtags": top_hashtags
-            }
+            "last_updated": datetime.fromtimestamp(last_updated).strftime('%Y-%m-%d %H:%M:%S'),
+            "data": {"top_10_posts": top_posts, "top_10_hashtags": top_hashtags}
         }
+    
+    # JIKA DATA KOSONG ATAU FORCE_UPDATE
     else:
-        # Jika Node sama sekali belum ada (Saat pertama kali aplikasi dijalankan seumur hidup)
-        print("[CACHE] Data belum ada di Neo4j. Memicu tarikan pertama di background...")
-        background_tasks.add_task(_background_sync_ig_to_neo4j)
-        return {
-            "status": "pending",
-            "message": "Data sedang ditarik dari Instagram untuk pertama kalinya. Silakan refresh dalam 1 menit.",
-            "data": {
-                "top_10_posts": [],
-                "top_10_hashtags": []
-            }
-        }
+        print("[IG CACHE] Sinkronisasi mendalam sedang berjalan. Menarik 1000 post...")
+        try:
+            # Jalankan secara sinkron agar koneksi tidak putus (Tunggu 20-30 detik)
+            _background_sync_ig_to_neo4j() 
+            
+            # Ambil ulang setelah selesai
+            with neo4j_driver.session() as db_session:
+                new_result = db_session.run(query).data()
+                
+            if new_result:
+                data = new_result[0]
+                return {
+                    "status": "success",
+                    "message": "Data berhasil diperbarui ke struktur baru.",
+                    "last_updated": datetime.fromtimestamp(data.get("last_updated")).strftime('%Y-%m-%d %H:%M:%S'),
+                    "data": {
+                        "top_10_posts": json.loads(data.get("top_posts")),
+                        "top_10_hashtags": json.loads(data.get("top_hashtags"))
+                    }
+                }
+        except Exception as e:
+            print(f"[ERROR] Gagal sinkronisasi: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    return {"status": "pending", "message": "Proses sedang berjalan."}
 
 def _background_sync_ig_to_neo4j():
     """
-    Berjalan di latar belakang (Makan waktu ~25 detik).
-    Menarik 1000 post, menghitung Top 10, dan menyimpannya ke Node DashboardCache di Neo4j.
+    Fungsi Worker: Menarik 1000 post, mencari Top 3 Posts per Hashtag, simpan ke Neo4j.
     """
-    print("[IG SYNC] Memulai penarikan 1000 post dari Instagram...")
+    print("[IG SYNC] Memulai penarikan 1000 post...")
     max_posts = 1000
     all_posts = []
     
@@ -100,85 +116,88 @@ def _background_sync_ig_to_neo4j():
         try:
             response = session.get(url, params=params)
             data = response.json()
-            
-            if 'error' in data: 
-                print(f"[IG SYNC ERROR] {data['error']['message']}")
-                break
-                
-            if 'data' in data: 
-                all_posts.extend(data['data'])
-                
+            if 'error' in data: break
+            if 'data' in data: all_posts.extend(data['data'])
             if 'paging' in data and 'next' in data['paging']:
                 url = data['paging']['next']
                 params = {} 
-            else:
-                break 
-        except Exception as e:
-            print(f"[IG SYNC REQUEST ERROR] {str(e)}")
-            break
+            else: break 
+        except: break
 
-    # Pangkas jika lebih dari 1000
     all_posts = all_posts[:max_posts]
-    
-    if not all_posts:
-        print("[IG SYNC] Gagal menarik data. Proses update dibatalkan.")
-        return
+    if not all_posts: return
 
-    # ==========================================
-    # A. MENGHITUNG TOP 10 POSTS
-    # ==========================================
+    # A. TOP 10 POSTS GLOBAL
     sorted_posts = sorted(all_posts, key=lambda x: x.get('like_count', 0) + x.get('comments_count', 0), reverse=True)
     top_10_posts = []
     for p in sorted_posts[:10]:
-        clean_caption = p.get("caption", "").replace('\n', ' ').replace('\r', ' ')
-        preview_caption = clean_caption[:100] + "..." if len(clean_caption) > 100 else clean_caption
+        clean_cap = p.get("caption", "").replace('\n', ' ')
         top_10_posts.append({
             "id": p.get("id"),
             "permalink": p.get("permalink", ""),
-            "caption": preview_caption,
+            "caption": clean_cap[:100] + "...",
             "like_count": p.get("like_count", 0),
             "comments_count": p.get("comments_count", 0),
             "total_engagement": p.get("like_count", 0) + p.get("comments_count", 0),
             "timestamp": p.get("timestamp", "")
         })
 
-    # ==========================================
-    # B. MENGHITUNG TOP 10 HASHTAGS
-    # ==========================================
-    all_hashtags = []
+    # B. TOP 10 HASHTAGS + TOP 3 POSTS PER HASHTAG
+    hashtag_counts = Counter()
+    hashtag_to_posts = defaultdict(list)
+
     for p in all_posts:
         caption = p.get('caption', '')
         if caption:
-            tags = re.findall(r"#(\w+)", caption.lower())
-            all_hashtags.extend(tags)
+            tags = set(re.findall(r"#(\w+)", caption.lower()))
             
-    hashtag_counts = Counter(all_hashtags)
-    top_10_hashtags = [{"hashtag": f"#{tag}", "count": c} for tag, c in hashtag_counts.most_common(10)]
+            # Siapkan info post LENGKAP untuk dilampirkan ke dalam hashtag
+            engagement = p.get('like_count', 0) + p.get('comments_count', 0)
+            clean_cap = p.get("caption", "").replace('\n', ' ')
+            
+            post_info = {
+                "id": p.get("id"),
+                "permalink": p.get("permalink", ""),
+                "caption": clean_cap[:100] + "...",
+                "like_count": p.get("like_count", 0),
+                "comments_count": p.get("comments_count", 0),
+                "total_engagement": engagement,
+                "timestamp": p.get("timestamp", "")
+            }
+            
+            for tag in tags:
+                hashtag_counts[tag] += 1
+                hashtag_to_posts[tag].append(post_info)
 
-    # ==========================================
-    # C. MENYIMPAN KE NEO4J MENGGUNAKAN MERGE
-    # ==========================================
-    # Neo4j tidak bisa menyimpan array of JSON secara langsung ke dalam node property.
-    # Maka kita harus mengubahnya menjadi String terlebih dahulu menggunakan json.dumps()
+    top_10_hashtags = []
+    for tag, count in hashtag_counts.most_common(10):
+        # Urutkan berdasarkan engagement tertinggi
+        sorted_posts_for_tag = sorted(hashtag_to_posts[tag], key=lambda x: x["total_engagement"], reverse=True)
+        top_10_hashtags.append({
+            "hashtag": f"#{tag}",
+            "count": count,
+            "top_posts": sorted_posts_for_tag[:3] # Sekarang berisi data lengkap
+        })
+
+    # C. SIMPAN KE NEO4J
     save_query = """
-    MERGE (n:DashboardCache {id: 'instagram_metrics'})
+    MERGE (n:InstagramMetrics {id: 'latest_metrics'})
     SET n.top_posts = $top_posts,
         n.top_hashtags = $top_hashtags,
         n.last_updated = $last_updated
     """
-    
     try:
         with neo4j_driver.session() as db_session:
             db_session.run(
                 save_query,
                 top_posts=json.dumps(top_10_posts),
                 top_hashtags=json.dumps(top_10_hashtags),
-                last_updated=time.time() # Menyimpan waktu saat ini (Epoch seconds)
+                last_updated=time.time()
             )
-        print("[IG SYNC] SUKSES! Node DashboardCache di Neo4j telah diperbarui.")
+        print("[IG SYNC] SUKSES memperbarui Neo4j.")
     except Exception as e:
-        print(f"[IG SYNC NEO4J ERROR] {str(e)}")
-
+        print(f"[IG SYNC ERROR] {str(e)}")
+         
 def _get_posts_recursive(start_date, end_date, max_posts=MAX_POSTS_TO_FETCH):
     all_posts = []
     url = f"{config.GRAPH_API_URL}/{config.IG_BUSINESS_ACCOUNT_ID}/media"
