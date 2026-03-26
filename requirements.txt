@@ -13,3 +13,6 @@ python-dateutil
 pyvis
 neo4j
 gspread
+openpyxl
+google-auth
+python-multipart

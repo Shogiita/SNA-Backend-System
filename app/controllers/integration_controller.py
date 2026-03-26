@@ -1,0 +1,365 @@
+import io
+import json
+import os
+import pandas as pd
+import networkx as nx
+import leidenalg as la
+import igraph as ig
+import gspread
+from google.oauth2.service_account import Credentials
+from fastapi import HTTPException, Response, UploadFile
+from fastapi.responses import StreamingResponse
+from app.database import neo4j_driver
+from app import config
+
+# Konfigurasi GSpread menggunakan Service Account Firebase yang sudah ada
+def get_gspread_client():
+    try:
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        creds = Credentials.from_service_account_info(config.FIREBASE_CREDENTIALS, scopes=scopes)
+        return gspread.authorize(creds)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal otentikasi Google Sheets: {str(e)}")
+
+# =====================================================================
+# 1. DATA EXTRACTOR & FORMATTER
+# =====================================================================
+def get_master_dataframe(source_type: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+    """Mengambil SEMUA data, memformat tanggal, menambah link, dan memfilter rentang waktu"""
+    dataset = []
+
+    if source_type == 'app':
+        # Mengambil dari Neo4j (KawanSS / Infoss beserta komentarnya)
+        query = """
+        MATCH (author:User)-[:POSTED|AUTHORED]->(p)
+        WHERE (p:KawanSS OR p:Infoss) AND (p.isDeleted = false OR p.isDeleted IS NULL)
+        OPTIONAL MATCH (c_author:User)-[:WROTE]->(c)-[:COMMENTED_ON]->(p)
+        RETURN 
+            coalesce(author.username, author.nama, author.id) AS Post_Author,
+            coalesce(p.judul, p.title, p.deskripsi, 'No Content') AS Post_Content,
+            coalesce(p.createdAt, p.uploadDate, '') AS Upload_Date,
+            coalesce(toInteger(p.jumlahLike), 0) AS Post_Likes,
+            coalesce(toInteger(p.jumlahView), 0) AS Post_Views,
+            coalesce(toInteger(p.jumlahComment), 0) AS Post_Comments,
+            coalesce(toInteger(p.jumlahShare), 0) AS Post_Shares,
+            coalesce(c_author.username, c_author.nama, c_author.id) AS Comment_Author,
+            coalesce(c.text, c.komentar, '') AS Comment_Content,
+            coalesce(toInteger(c.likes), 0) AS Comment_Likes,
+            0 AS Comment_Replies_Count,
+            p.id AS Target_Post_ID
+        """
+        with neo4j_driver.session() as session:
+            records = session.run(query).data()
+            
+        for r in records:
+            # Baris untuk Postingan Utama
+            dataset.append({
+                "Interaction_Type": "POST",
+                "Source_User": r["Post_Author"],
+                "Target": r["Target_Post_ID"],
+                "Post_Link": "", # App internal tidak punya permalink eksternal
+                "User_Pembuat_Post": r["Post_Author"],
+                "Post": r["Post_Content"],
+                "Tanggal_Upload": r["Upload_Date"],
+                "Jumlah_Like_Post": r["Post_Likes"],
+                "Jumlah_Views_Post": r["Post_Views"],
+                "Jumlah_Comment_Post": r["Post_Comments"],
+                "Jumlah_Share_Post": r["Post_Shares"],
+                "Komentar": "",
+                "Balasan_Komentar": "",
+                "Jumlah_Like_Komentar": 0,
+                "Jumlah_Reply_Komentar": 0
+            })
+            
+            # Baris untuk Komentar (Jika ada)
+            if r["Comment_Author"] and r["Comment_Content"]:
+                dataset.append({
+                    "Interaction_Type": "COMMENT",
+                    "Source_User": r["Comment_Author"],
+                    "Target": r["Target_Post_ID"],
+                    "Post_Link": "",
+                    "User_Pembuat_Post": r["Post_Author"],
+                    "Post": r["Post_Content"],
+                    "Tanggal_Upload": r["Upload_Date"],
+                    "Jumlah_Like_Post": r["Post_Likes"],
+                    "Jumlah_Views_Post": r["Post_Views"],
+                    "Jumlah_Comment_Post": r["Post_Comments"],
+                    "Jumlah_Share_Post": r["Post_Shares"],
+                    "Komentar": r["Comment_Content"],
+                    "Balasan_Komentar": "",
+                    "Jumlah_Like_Komentar": r["Comment_Likes"],
+                    "Jumlah_Reply_Komentar": r["Comment_Replies_Count"]
+                })
+
+    elif source_type == 'instagram':
+        cache_file = "instagram_data_cache.json"
+        if not os.path.exists(cache_file):
+            raise HTTPException(status_code=404, detail="Data Instagram belum disinkronisasi. Jalankan /sna/ingest")
+            
+        with open(cache_file, "r", encoding="utf-8") as f:
+            posts = json.load(f)
+            
+        for p in posts:
+            post_id = p.get('id')
+            post_caption = p.get('caption', '').replace('\n', ' ')
+            post_author = p.get('username', 'Suara_Surabaya_Official')
+            permalink = p.get('permalink', '') # Ambil link post IG
+            post_likes = p.get('like_count', 0)
+            post_comments_count = p.get('comments_count', 0)
+            
+            # Post Utama
+            dataset.append({
+                "Interaction_Type": "POST",
+                "Source_User": post_author,
+                "Target": post_id,
+                "Post_Link": permalink,
+                "User_Pembuat_Post": post_author,
+                "Post": post_caption,
+                "Tanggal_Upload": p.get('timestamp', ''),
+                "Jumlah_Like_Post": post_likes,
+                "Jumlah_Views_Post": 0,
+                "Jumlah_Comment_Post": post_comments_count,
+                "Jumlah_Share_Post": 0,
+                "Komentar": "",
+                "Balasan_Komentar": "",
+                "Jumlah_Like_Komentar": 0,
+                "Jumlah_Reply_Komentar": 0
+            })
+            
+            # Komentar & Reply
+            for act in p.get('interactions', []):
+                i_type = act.get('interaction_type', 'COMMENT')
+                content = act.get('content', '').replace('\n', ' ')
+                
+                dataset.append({
+                    "Interaction_Type": i_type,
+                    "Source_User": act.get('source_username', 'Unknown'),
+                    "Target": act.get('target_id', post_id),
+                    "Post_Link": permalink,
+                    "User_Pembuat_Post": post_author,
+                    "Post": post_caption,
+                    "Tanggal_Upload": act.get('timestamp', ''),
+                    "Jumlah_Like_Post": post_likes,
+                    "Jumlah_Views_Post": 0,
+                    "Jumlah_Comment_Post": post_comments_count,
+                    "Jumlah_Share_Post": 0,
+                    "Komentar": content if i_type == 'COMMENT' else "",
+                    "Balasan_Komentar": content if i_type == 'REPLY' else "",
+                    "Jumlah_Like_Komentar": act.get('likes', 0),
+                    "Jumlah_Reply_Komentar": 0
+                })
+    else:
+        raise HTTPException(status_code=400, detail="source_type harus 'app' atau 'instagram'")
+
+    # Konversi ke Pandas DataFrame lalu hapus duplikasi
+    df = pd.DataFrame(dataset)
+    df = df.drop_duplicates()
+
+    if df.empty:
+        return df
+
+    # --- PERBAIKAN DATE FILTER & PARSING WAKTU YANG AMAN ---
+    def parse_to_datetime(val):
+        if pd.isna(val) or str(val).strip() == "":
+            return pd.NaT
+        try:
+            # Jika ISO string (Instagram) spt: 2024-05-10T12:00:00+0000
+            if isinstance(val, str) and 'T' in val:
+                dt = pd.to_datetime(val)
+                if dt.tzinfo is not None:
+                    dt = dt.tz_localize(None) # Hapus timezone agar perbandingan valid
+                return dt
+            
+            # Jika angka dari Firestore/Neo4j
+            val_num = float(val)
+            if val_num > 1e11:  # milidetik
+                return pd.to_datetime(val_num, unit='ms')
+            else:  # detik
+                return pd.to_datetime(val_num, unit='s')
+        except:
+            return pd.NaT
+
+    # 1. Konversi SEMUA data tanggal ke objek datetime yang terstandarisasi
+    df['Datetime_Obj'] = df['Tanggal_Upload'].apply(parse_to_datetime)
+
+    # 2. Lakukan Filter menggunakan Objek Waktu (Bukan String)
+    if start_date:
+        try:
+            start_dt = pd.to_datetime(start_date)
+            df = df[df['Datetime_Obj'] >= start_dt]
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Format start_date salah: {e}")
+
+    if end_date:
+        try:
+            # Tambah 1 hari kurang 1 detik agar filter mencakup seluruh jam di hari terakhir
+            end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=1, seconds=-1)
+            df = df[df['Datetime_Obj'] <= end_dt]
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Format end_date salah: {e}")
+
+    # 3. Ubah kembali menjadi String rapi khusus untuk tampilan di Excel
+    df['Tanggal_Upload'] = df['Datetime_Obj'].apply(lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notnull(x) else "")
+    
+    # Hapus kolom bantuan
+    df = df.drop(columns=['Datetime_Obj'])
+
+    return df
+
+# =====================================================================
+# 2. EXPORT EXCEL
+# =====================================================================
+async def export_to_excel(source_type: str, start_date: str = None, end_date: str = None):
+    df = get_master_dataframe(source_type, start_date, end_date)
+    
+    if df.empty:
+        raise HTTPException(status_code=404, detail="Tidak ada data yang ditemukan pada rentang waktu tersebut.")
+        
+    stream = io.BytesIO()
+    with pd.ExcelWriter(stream, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='SNA_Dataset')
+        
+    stream.seek(0)
+    filename = f"SNA_Export_{source_type.upper()}.xlsx"
+    return StreamingResponse(
+        stream, 
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+# =====================================================================
+# 3. GOOGLE SHEETS (LINK, SYNC, UNLINK)
+# =====================================================================
+async def link_to_sheets(email: str, source_type: str, start_date: str = None, end_date: str = None):
+    gc = get_gspread_client()
+    try:
+        sh = gc.create(f"SNA_Dataset_{source_type.upper()}_{pd.Timestamp.now().strftime('%Y%m%d')}")
+        sh.share(email, perm_type='user', role='writer')
+        
+        df = get_master_dataframe(source_type, start_date, end_date)
+        worksheet = sh.get_worksheet(0)
+        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+        
+        return {"status": "success", "message": "Spreadsheet berhasil dibuat", "sheet_url": sh.url, "sheet_id": sh.id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal link ke Sheets: {str(e)}")
+
+async def sync_to_sheets(sheet_id: str, source_type: str, start_date: str = None, end_date: str = None):
+    gc = get_gspread_client()
+    try:
+        sh = gc.open_by_key(sheet_id)
+        worksheet = sh.get_worksheet(0)
+        worksheet.clear()
+        
+        df = get_master_dataframe(source_type, start_date, end_date)
+        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+        return {"status": "success", "message": "Data di Spreadsheet berhasil disinkronisasi!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def unlink_sheets(sheet_id: str):
+    gc = get_gspread_client()
+    try:
+        gc.del_spreadsheet(sheet_id)
+        return {"status": "success", "message": "Spreadsheet berhasil dihapus/di-unlink."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# =====================================================================
+# 4. IMPORT & CALCULATE CENTRALITY (EXCEL / SHEETS)
+# =====================================================================
+def _calculate_graph_from_dataframe(df: pd.DataFrame):
+    """Membaca format file buatan kita sendiri untuk membangun Graf dan Centrality"""
+    G = nx.DiGraph()
+    
+    for index, row in df.iterrows():
+        source = str(row.get('Source_User', '')).strip()
+        target = str(row.get('Target', '')).strip()
+        i_type = str(row.get('Interaction_Type', 'POST')).upper()
+        
+        if not source or source == 'nan': continue
+            
+        s_node = f"user_{source}"
+        if not G.has_node(s_node):
+            G.add_node(s_node, type="user", label=source)
+            
+        if i_type == 'POST':
+            t_node = f"post_{target}"
+            if not G.has_node(t_node):
+                # NOTE: Sudah menggunakan kolom 'Post' hasil request Anda
+                G.add_node(t_node, type="post", label=str(row.get('Post', ''))[:20])
+            G.add_edge(s_node, t_node, weight=5, type="AUTHORED")
+            
+        elif i_type in ['COMMENT', 'REPLY']:
+            t_node = f"post_{target}" if i_type == 'COMMENT' else f"user_{target}"
+            if not G.has_node(t_node):
+                G.add_node(t_node, type="post" if i_type == 'COMMENT' else "user", label=target)
+            
+            if G.has_edge(s_node, t_node):
+                G[s_node][t_node]['weight'] += 3
+            else:
+                G.add_edge(s_node, t_node, weight=3, type=i_type)
+
+    G.remove_nodes_from(list(nx.isolates(G)))
+    if G.number_of_nodes() == 0:
+        raise HTTPException(status_code=400, detail="Format data kosong atau tidak valid.")
+
+    for u, v, d in G.edges(data=True):
+        d['distance'] = 1.0 / d['weight'] if d.get('weight', 1) > 0 else 1.0
+
+    deg_cent = nx.degree_centrality(G)
+    bet_cent = nx.betweenness_centrality(G, weight='distance')
+    clo_cent = nx.closeness_centrality(G, distance='distance')
+    
+    try:
+        eig_cent = nx.eigenvector_centrality(G, weight='weight', max_iter=1000)
+    except:
+        eig_cent = {n: 0.0 for n in G.nodes()}
+
+    ig_G = ig.Graph.TupleList(G.edges(), directed=True)
+    partition = la.find_partition(ig_G, la.ModularityVertexPartition, n_iterations=-1)
+    community_map = {ig_G.vs[node.index]['name']: comm_id for comm_id, members in enumerate(partition) for node in members}
+
+    nodes_out = []
+    for n in G.nodes():
+        nodes_out.append({
+            "id": n,
+            "label": G.nodes[n].get('label', n),
+            "attributes": {"community": community_map.get(n, 0)},
+            "metrics": {
+                "degree": deg_cent.get(n, 0.0),
+                "betweenness": bet_cent.get(n, 0.0),
+                "closeness": clo_cent.get(n, 0.0),
+                "eigenvector": eig_cent.get(n, 0.0)
+            }
+        })
+
+    return {
+        "meta": {"total_nodes": G.number_of_nodes(), "total_edges": G.number_of_edges()},
+        "graph_data": {
+            "nodes": nodes_out,
+            "edges": [{"source": u, "target": v, "weight": d.get('weight', 1)} for u, v, d in G.edges(data=True)]
+        }
+    }
+
+async def import_from_excel(file: UploadFile):
+    try:
+        content = await file.read()
+        df = pd.read_excel(io.BytesIO(content))
+        return _calculate_graph_from_dataframe(df)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Gagal memproses file Excel: {str(e)}")
+
+async def import_from_sheets(sheet_id: str):
+    gc = get_gspread_client()
+    try:
+        sh = gc.open_by_key(sheet_id)
+        worksheet = sh.get_worksheet(0)
+        data = worksheet.get_all_records()
+        df = pd.DataFrame(data)
+        return _calculate_graph_from_dataframe(df)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Gagal memproses Google Sheets: {str(e)}")
