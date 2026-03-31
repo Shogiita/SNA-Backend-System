@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Query, UploadFile, File
+from fastapi import APIRouter, Query, UploadFile, File, Body
+from pydantic import BaseModel
+from typing import List, Optional
 from app.controllers import integration_controller
 
 router = APIRouter(
@@ -6,22 +8,42 @@ router = APIRouter(
     tags=["Excel & Sheets Integration"]
 )
 
-@router.get("/export/excel")
-async def export_excel_endpoint(source: str = Query(..., description="'app' atau 'instagram'")):
-    return await integration_controller.export_to_excel(source)
+class ExportPayload(BaseModel):
+    source: str
+    export_all: bool = True
+    selected_columns: List[str] = []
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+class SheetsLinkPayload(ExportPayload):
+    email: str
+
+class SheetsSyncPayload(ExportPayload):
+    sheet_id: str
+
+@router.post("/export/excel")
+async def export_excel_endpoint(payload: ExportPayload):
+    """Export file Excel berdasarkan kustomisasi kolom user"""
+    return await integration_controller.export_to_excel(
+        payload.source, payload.start_date, payload.end_date, payload.selected_columns, payload.export_all
+    )
 
 @router.post("/sheets/link")
-async def link_sheets_endpoint(email: str, source: str = Query(..., description="'app' atau 'instagram'")):
+async def link_sheets_endpoint(payload: SheetsLinkPayload):
     """Membuat Spreadsheet baru dan membagikannya ke email Anda"""
-    return await integration_controller.link_to_sheets(email, source)
+    return await integration_controller.link_to_sheets(
+        payload.email, payload.source, payload.start_date, payload.end_date, payload.selected_columns, payload.export_all
+    )
 
 @router.put("/sheets/sync")
-async def sync_sheets_endpoint(sheet_id: str, source: str = Query(..., description="'app' atau 'instagram'")):
+async def sync_sheets_endpoint(payload: SheetsSyncPayload):
     """Memperbarui data di Spreadsheet yang sudah ada"""
-    return await integration_controller.sync_to_sheets(sheet_id, source)
+    return await integration_controller.sync_to_sheets(
+        payload.sheet_id, payload.source, payload.start_date, payload.end_date, payload.selected_columns, payload.export_all
+    )
 
 @router.delete("/sheets/unlink")
-async def unlink_sheets_endpoint(sheet_id: str):
+async def unlink_sheets_endpoint(sheet_id: str = Query(...)):
     """Menghapus/Unlink Spreadsheet"""
     return await integration_controller.unlink_sheets(sheet_id)
 

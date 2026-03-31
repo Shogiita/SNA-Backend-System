@@ -27,10 +27,13 @@ def get_gspread_client():
 # =====================================================================
 # 1. DATA EXTRACTOR & FORMATTER
 # =====================================================================
-def get_master_dataframe(source_type: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
-    """Mengambil SEMUA data, memformat tanggal, menambah link, dan memfilter rentang waktu"""
+def get_master_dataframe(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True) -> pd.DataFrame:
+    """Mengambil SEMUA data, memformat tanggal, menambah link, memfilter rentang waktu, dan memfilter kolom (custom)"""
     dataset = []
 
+    # -----------------------------------------------------------------
+    # A. SUMBER DATA: APP (Neo4j)
+    # -----------------------------------------------------------------
     if source_type == 'app':
         # Mengambil dari Neo4j (KawanSS / Infoss beserta komentarnya)
         query = """
@@ -94,6 +97,9 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
                     "Jumlah_Reply_Komentar": r["Comment_Replies_Count"]
                 })
 
+    # -----------------------------------------------------------------
+    # B. SUMBER DATA: INSTAGRAM (JSON Cache)
+    # -----------------------------------------------------------------
     elif source_type == 'instagram':
         cache_file = "instagram_data_cache.json"
         if not os.path.exists(cache_file):
@@ -161,7 +167,9 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
     if df.empty:
         return df
 
-    # --- PERBAIKAN DATE FILTER & PARSING WAKTU YANG AMAN ---
+    # -----------------------------------------------------------------
+    # C. FILTER TANGGAL (AMAT PENTING: PARSING WAKTU)
+    # -----------------------------------------------------------------
     def parse_to_datetime(val):
         if pd.isna(val) or str(val).strip() == "":
             return pd.NaT
@@ -207,13 +215,34 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
     # Hapus kolom bantuan
     df = df.drop(columns=['Datetime_Obj'])
 
+    # -----------------------------------------------------------------
+    # D. FILTER KOLOM (BERDASARKAN REQUEST USER)
+    # -----------------------------------------------------------------
+    if not export_all and selected_columns is not None:
+        # Kunci kolom mandatory agar jika diimport lagi tidak error saat generate graph
+        mandatory_columns = ['Interaction_Type', 'Source_User', 'Target', 'Post_Link', 'Post']
+        final_columns = []
+        
+        # 1. Pastikan kolom mandatory ada di depan
+        for col in mandatory_columns:
+            if col in df.columns:
+                final_columns.append(col)
+                
+        # 2. Tambahkan kolom pilihan user (hindari duplikasi)
+        for col in selected_columns:
+            if col in df.columns and col not in final_columns:
+                final_columns.append(col)
+                
+        # 3. Potong DataFrame
+        df = df[final_columns]
+
     return df
 
 # =====================================================================
 # 2. EXPORT EXCEL
 # =====================================================================
-async def export_to_excel(source_type: str, start_date: str = None, end_date: str = None):
-    df = get_master_dataframe(source_type, start_date, end_date)
+async def export_to_excel(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
+    df = get_master_dataframe(source_type, start_date, end_date, selected_columns, export_all)
     
     if df.empty:
         raise HTTPException(status_code=404, detail="Tidak ada data yang ditemukan pada rentang waktu tersebut.")
@@ -233,13 +262,13 @@ async def export_to_excel(source_type: str, start_date: str = None, end_date: st
 # =====================================================================
 # 3. GOOGLE SHEETS (LINK, SYNC, UNLINK)
 # =====================================================================
-async def link_to_sheets(email: str, source_type: str, start_date: str = None, end_date: str = None):
+async def link_to_sheets(email: str, source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
     gc = get_gspread_client()
     try:
         sh = gc.create(f"SNA_Dataset_{source_type.upper()}_{pd.Timestamp.now().strftime('%Y%m%d')}")
         sh.share(email, perm_type='user', role='writer')
         
-        df = get_master_dataframe(source_type, start_date, end_date)
+        df = get_master_dataframe(source_type, start_date, end_date, selected_columns, export_all)
         worksheet = sh.get_worksheet(0)
         worksheet.update([df.columns.values.tolist()] + df.values.tolist())
         
@@ -247,14 +276,14 @@ async def link_to_sheets(email: str, source_type: str, start_date: str = None, e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal link ke Sheets: {str(e)}")
 
-async def sync_to_sheets(sheet_id: str, source_type: str, start_date: str = None, end_date: str = None):
+async def sync_to_sheets(sheet_id: str, source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
     gc = get_gspread_client()
     try:
         sh = gc.open_by_key(sheet_id)
         worksheet = sh.get_worksheet(0)
         worksheet.clear()
         
-        df = get_master_dataframe(source_type, start_date, end_date)
+        df = get_master_dataframe(source_type, start_date, end_date, selected_columns, export_all)
         worksheet.update([df.columns.values.tolist()] + df.values.tolist())
         return {"status": "success", "message": "Data di Spreadsheet berhasil disinkronisasi!"}
     except Exception as e:
@@ -289,7 +318,7 @@ def _calculate_graph_from_dataframe(df: pd.DataFrame):
         if i_type == 'POST':
             t_node = f"post_{target}"
             if not G.has_node(t_node):
-                # NOTE: Sudah menggunakan kolom 'Post' hasil request Anda
+                # NOTE: Menggunakan kolom 'Post' hasil request Anda
                 G.add_node(t_node, type="post", label=str(row.get('Post', ''))[:20])
             G.add_edge(s_node, t_node, weight=5, type="AUTHORED")
             
