@@ -19,6 +19,7 @@ import re
 from collections import Counter, defaultdict
 from fastapi import HTTPException, BackgroundTasks
 from app.database import neo4j_driver
+import calendar
 
 CACHE_FILE = "instagram_data_cache.json"
 OUTPUT_HTML_DIR = "generated_graphs"
@@ -30,73 +31,120 @@ MAX_WORKERS = 10
 os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
 session = requests.Session()
 
-
-session = requests.Session()
-
-def get_instagram_metrics(background_tasks: BackgroundTasks, force_update: bool = False):
-    query = """
-    MATCH (n:InstagramMetrics {id: 'latest_metrics'}) 
-    RETURN n.top_posts AS top_posts, n.top_hashtags AS top_hashtags, n.last_updated AS last_updated
-    """
+def get_instagram_metrics(start_date: str = None, end_date: str = None):
+    start_time = time.time()
     
-    with neo4j_driver.session() as db_session:
-        result = db_session.run(query).data()
-        
-    current_time = time.time()
-    
-    # JIKA DATA ADA DAN TIDAK DIPAKSA UPDATE
-    if result and not force_update:
-        data = result[0]
-        last_updated = data.get("last_updated", 0)
-        
-        # Load JSON
-        top_posts = json.loads(data.get("top_posts", "[]"))
-        top_hashtags = json.loads(data.get("top_hashtags", "[]"))
+    url = f"{config.GRAPH_API_URL}/{config.IG_BUSINESS_ACCOUNT_ID}/media"
+    params = {
+        "access_token": config.IG_ACCESS_TOKEN,
+        "fields": "id,caption,permalink,timestamp,like_count,comments_count",
+        "limit": 100 
+    }
 
-        # Cek apakah struktur hashtag sudah yang terbaru (punya top_posts)
-        # Jika belum ada top_posts di elemen pertama, maka paksa update
-        is_old_structure = False
-        if top_hashtags and "top_posts" not in top_hashtags[0]:
-            is_old_structure = True
-
-        if (current_time - last_updated > 900) or is_old_structure:
-            print("[IG CACHE] Struktur lama atau data usang. Menjalankan background sync...")
-            background_tasks.add_task(_background_sync_ig_to_neo4j)
-            
-        return {
-            "status": "success",
-            "last_updated": datetime.fromtimestamp(last_updated).strftime('%Y-%m-%d %H:%M:%S'),
-            "data": {"top_10_posts": top_posts, "top_10_hashtags": top_hashtags}
-        }
+    now = datetime.now(timezone.utc)
     
-    # JIKA DATA KOSONG ATAU FORCE_UPDATE
+    # 1. Tentukan Rentang Waktu
+    if start_date:
+        start_dt = parser.parse(start_date).replace(tzinfo=timezone.utc)
     else:
-        print("[IG CACHE] Sinkronisasi mendalam sedang berjalan. Menarik 1000 post...")
-        try:
-            # Jalankan secara sinkron agar koneksi tidak putus (Tunggu 20-30 detik)
-            _background_sync_ig_to_neo4j() 
-            
-            # Ambil ulang setelah selesai
-            with neo4j_driver.session() as db_session:
-                new_result = db_session.run(query).data()
+        start_dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    if end_date:
+        end_dt = parser.parse(end_date).replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+    else:
+        last_day_of_month = calendar.monthrange(now.year, now.month)[1]
+        end_dt = now.replace(day=last_day_of_month, hour=23, minute=59, second=59, microsecond=0)
+
+    all_posts = []
+    
+    try:
+        # 2. Tarik Semua Data Dari Instagram
+        while url:
+            # Safety break (15 detik) untuk mencegah server hang jika API error, 
+            # tapi cukup panjang untuk menjamin semua post di rentang waktu terambil.
+            if time.time() - start_time > 15.0:
+                break
                 
-            if new_result:
-                data = new_result[0]
-                return {
-                    "status": "success",
-                    "message": "Data berhasil diperbarui ke struktur baru.",
-                    "last_updated": datetime.fromtimestamp(data.get("last_updated")).strftime('%Y-%m-%d %H:%M:%S'),
-                    "data": {
-                        "top_10_posts": json.loads(data.get("top_posts")),
-                        "top_10_hashtags": json.loads(data.get("top_hashtags"))
-                    }
-                }
-        except Exception as e:
-            print(f"[ERROR] Gagal sinkronisasi: {str(e)}")
-            return {"status": "error", "message": str(e)}
+            response = session.get(url, params=params, timeout=5)
+            data = response.json()
+            
+            if 'data' not in data or len(data['data']) == 0:
+                break
 
-    return {"status": "pending", "message": "Proses sedang berjalan."}
+            stop_pagination = False
 
+            # Lakukan Pengecekan per Postingan
+            for p in data['data']:
+                p_time_str = p.get('timestamp')
+                if not p_time_str: continue
+                    
+                p_time = parser.parse(p_time_str).replace(tzinfo=timezone.utc)
+
+                if p_time > end_dt:
+                    # Postingan terlalu baru (misal kita cari Feb, tapi API ngasih Mar), Skip.
+                    continue
+                elif p_time >= start_dt:
+                    # Postingan masuk dalam rentang waktu, MASUKKAN KE ARRAY
+                    all_posts.append(p)
+                else:
+                    # Karena API Instagram berurutan dari baru ke lama, 
+                    # Jika kita ketemu post yang lebih lama dari start_date, BERHENTI MENCARI.
+                    # Ini menjamin kita sudah punya SEMUA POST di rentang waktu tersebut.
+                    stop_pagination = True
+                    break
+
+            if stop_pagination:
+                break
+
+            # Lanjut ke halaman selanjutnya
+            if 'paging' in data and 'next' in data['paging']:
+                url = data['paging']['next']
+                params = {} # Kosongkan karena URL 'next' sudah membawa token
+            else:
+                break
+                
+    except Exception as e:
+        return {"status": "error", "message": f"Gagal mengambil data live Instagram: {str(e)}"}
+
+    str_start = start_dt.strftime('%Y-%m-%d')
+    str_end = end_dt.strftime('%Y-%m-%d')
+
+    if not all_posts:
+        return {
+            "status": "success", 
+            "message": f"Tidak ada postingan yang ditemukan dari {str_start} hingga {str_end}.", 
+            "data": {"top_10_posts": []}
+        }
+
+    # =================================================================
+    # 3. SORTING UNTUK MENDAPATKAN HASIL MAKSIMAL (LIKE TERBANYAK)
+    # =================================================================
+    # Sort array all_posts secara descending (besar ke kecil) berdasarkan like_count
+    all_posts.sort(key=lambda x: x.get('like_count', 0), reverse=True)
+    
+    # 4. Ambil 10 Teratas (Top 10)
+    top_10_posts = []
+    for p in all_posts[:10]:
+        clean_cap = p.get("caption", "").replace('\n', ' ')
+        top_10_posts.append({
+            "id": p.get("id"),
+            "permalink": p.get("permalink", ""),
+            "caption": clean_cap[:100] + "..." if len(clean_cap) > 100 else clean_cap,
+            "like_count": p.get("like_count", 0),
+            "comments_count": p.get("comments_count", 0),
+            "timestamp": p.get("timestamp", "")
+        })
+
+    process_time = round(time.time() - start_time, 2)
+
+    return {
+        "status": "success",
+        "message": f"Data live dari {str_start} s.d {str_end} ditarik ({len(all_posts)} post) dan disortir berdasarkan Like terbanyak dalam {process_time} detik.",
+        "data": {
+            "top_10_posts": top_10_posts
+        }
+    }
+    
 def _background_sync_ig_to_neo4j():
     """
     Fungsi Worker: Menarik 1000 post, mencari Top 3 Posts per Hashtag, simpan ke Neo4j.

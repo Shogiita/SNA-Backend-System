@@ -7,8 +7,11 @@ router = APIRouter(
 )
 
 @router.get("/metrics")
-def get_sna_dashboard_metrics(background_tasks: BackgroundTasks):
-    return sna_controller.get_instagram_metrics(background_tasks)
+def get_sna_dashboard_metrics(
+    start_date: str = Query(None, description="Format tanggal start (e.g. 2024-01-01)"),
+    end_date: str = Query(None, description="Format tanggal end (e.g. 2024-12-31)")
+):
+    return sna_controller.get_instagram_metrics(start_date=start_date, end_date=end_date)
     
 @router.get("/ingest")
 async def run_ingestion_endpoint(background_tasks: BackgroundTasks):
