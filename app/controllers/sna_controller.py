@@ -29,6 +29,16 @@ FETCH_MONTHS_BACK = 12
 MAX_WORKERS = 10
 
 os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
+import time
+import requests
+import calendar
+import re
+from collections import Counter, defaultdict
+from dateutil import parser
+from datetime import datetime, timezone
+from app import config
+
+# Gunakan Session untuk mempercepat koneksi (Connection Pooling)
 session = requests.Session()
 
 def get_instagram_metrics(start_date: str = None, end_date: str = None):
@@ -61,7 +71,6 @@ def get_instagram_metrics(start_date: str = None, end_date: str = None):
         # 2. Tarik Semua Data Dari Instagram
         while url:
             # Safety break (15 detik) untuk mencegah server hang jika API error, 
-            # tapi cukup panjang untuk menjamin semua post di rentang waktu terambil.
             if time.time() - start_time > 15.0:
                 break
                 
@@ -81,15 +90,14 @@ def get_instagram_metrics(start_date: str = None, end_date: str = None):
                 p_time = parser.parse(p_time_str).replace(tzinfo=timezone.utc)
 
                 if p_time > end_dt:
-                    # Postingan terlalu baru (misal kita cari Feb, tapi API ngasih Mar), Skip.
+                    # Postingan terlalu baru, Skip.
                     continue
                 elif p_time >= start_dt:
                     # Postingan masuk dalam rentang waktu, MASUKKAN KE ARRAY
                     all_posts.append(p)
                 else:
-                    # Karena API Instagram berurutan dari baru ke lama, 
-                    # Jika kita ketemu post yang lebih lama dari start_date, BERHENTI MENCARI.
-                    # Ini menjamin kita sudah punya SEMUA POST di rentang waktu tersebut.
+                    # Karena API berurutan dari baru ke lama, 
+                    # Jika ketemu post yang lebih lama dari start_date, BERHENTI MENCARI.
                     stop_pagination = True
                     break
 
@@ -113,16 +121,53 @@ def get_instagram_metrics(start_date: str = None, end_date: str = None):
         return {
             "status": "success", 
             "message": f"Tidak ada postingan yang ditemukan dari {str_start} hingga {str_end}.", 
-            "data": {"top_10_posts": []}
+            "data": {"top_10_posts": [], "top_10_hashtags": []}
         }
 
     # =================================================================
-    # 3. SORTING UNTUK MENDAPATKAN HASIL MAKSIMAL (LIKE TERBANYAK)
+    # 3. KUMPULKAN DAN HITUNG HASHTAG DARI POSTINGAN YANG ADA
+    # =================================================================
+    hashtag_counts = Counter()
+    hashtag_to_posts = defaultdict(list)
+
+    for p in all_posts:
+        caption = p.get('caption', '')
+        if caption:
+            # Gunakan set() agar 1 hashtag dihitung 1x saja per postingan
+            tags = set(re.findall(r"#(\w+)", caption.lower()))
+            clean_cap = caption.replace('\n', ' ')
+            
+            post_info = {
+                "id": p.get("id"),
+                "permalink": p.get("permalink", ""),
+                "caption": clean_cap[:100] + "..." if len(clean_cap) > 100 else clean_cap,
+                "like_count": p.get("like_count", 0),
+                "comments_count": p.get("comments_count", 0),
+                "timestamp": p.get("timestamp", "")
+            }
+            
+            for tag in tags:
+                hashtag_counts[tag] += 1
+                hashtag_to_posts[tag].append(post_info)
+
+    # Ambil 10 Hashtag Teratas
+    top_10_hashtags = []
+    for tag, count in hashtag_counts.most_common(10):
+        # Sort postingan di dalam hashtag tersebut berdasarkan like terbanyak
+        sorted_tag_posts = sorted(hashtag_to_posts[tag], key=lambda x: x["like_count"], reverse=True)
+        top_10_hashtags.append({
+            "hashtag": f"#{tag}",
+            "count": count,
+            "top_posts": sorted_tag_posts[:3] # Tampilkan 3 post terbaik di tiap hashtag
+        })
+
+    # =================================================================
+    # 4. SORTING UNTUK MENDAPATKAN TOP 10 POST (LIKE TERBANYAK)
     # =================================================================
     # Sort array all_posts secara descending (besar ke kecil) berdasarkan like_count
     all_posts.sort(key=lambda x: x.get('like_count', 0), reverse=True)
     
-    # 4. Ambil 10 Teratas (Top 10)
+    # Ambil 10 Teratas (Top 10)
     top_10_posts = []
     for p in all_posts[:10]:
         clean_cap = p.get("caption", "").replace('\n', ' ')
@@ -141,10 +186,11 @@ def get_instagram_metrics(start_date: str = None, end_date: str = None):
         "status": "success",
         "message": f"Data live dari {str_start} s.d {str_end} ditarik ({len(all_posts)} post) dan disortir berdasarkan Like terbanyak dalam {process_time} detik.",
         "data": {
-            "top_10_posts": top_10_posts
+            "top_10_posts": top_10_posts,
+            "top_10_hashtags": top_10_hashtags
         }
     }
-    
+
 def _background_sync_ig_to_neo4j():
     """
     Fungsi Worker: Menarik 1000 post, mencari Top 3 Posts per Hashtag, simpan ke Neo4j.
