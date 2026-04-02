@@ -9,7 +9,7 @@ router = APIRouter(
 )
 
 class ExportPayload(BaseModel):
-    source: str
+    source: str # Pilihan: 'app' atau 'instagram'
     export_all: bool = True
     selected_columns: List[str] = []
     start_date: Optional[str] = None
@@ -17,6 +17,7 @@ class ExportPayload(BaseModel):
 
 class SheetsLinkPayload(ExportPayload):
     email: str
+    existing_sheet_url: Optional[str] = None  # Jika ingin update ke sheet yang sudah ada, isi ID-nya. Kalau kosong, buat sheet baru.
 
 class SheetsSyncPayload(ExportPayload):
     sheet_id: str
@@ -30,10 +31,15 @@ async def export_excel_endpoint(payload: ExportPayload):
 
 @router.post("/sheets/link")
 async def link_sheets_endpoint(payload: SheetsLinkPayload):
-    """Membuat Spreadsheet baru dan membagikannya ke email Anda"""
+    """Menautkan data (App/Instagram) ke Spreadsheet baru atau yang sudah ada"""
     return await integration_controller.link_to_sheets(
-        payload.email, payload.source, payload.start_date, payload.end_date, payload.selected_columns, payload.export_all
+        payload.email, payload.source, payload.start_date, payload.end_date, payload.selected_columns, payload.export_all, payload.existing_sheet_url
     )
+
+@router.get("/sheets/linked")
+async def get_linked_sheets_endpoint():
+    """Mendapatkan daftar semua Spreadsheet yang tersambung (Untuk List di Frontend)"""
+    return await integration_controller.get_all_linked_sheets()
 
 @router.put("/sheets/sync")
 async def sync_sheets_endpoint(payload: SheetsSyncPayload):
@@ -42,10 +48,20 @@ async def sync_sheets_endpoint(payload: SheetsSyncPayload):
         payload.sheet_id, payload.source, payload.start_date, payload.end_date, payload.selected_columns, payload.export_all
     )
 
+@router.delete("/sheets/unlink/{doc_id}")
+async def unlink_sheets_endpoint(doc_id: str):
+    """Menghapus/Unlink 1 Spreadsheet berdasarkan ID"""
+    return await integration_controller.unlink_sheets(doc_id)
+
 @router.delete("/sheets/unlink")
 async def unlink_sheets_endpoint(sheet_id: str = Query(...)):
     """Menghapus/Unlink Spreadsheet"""
     return await integration_controller.unlink_sheets(sheet_id)
+
+@router.delete("/sheets/unlink-all")
+async def unlink_all_sheets_endpoint():
+    """Menghapus SEMUA Spreadsheet yang tersambung (Clear All)"""
+    return await integration_controller.unlink_all_sheets()
 
 @router.post("/import/excel")
 async def import_excel_endpoint(file: UploadFile = File(...)):

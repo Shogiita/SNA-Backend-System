@@ -6,10 +6,11 @@ import networkx as nx
 import leidenalg as la
 import igraph as ig
 import gspread
+import datetime
 from google.oauth2.service_account import Credentials
 from fastapi import HTTPException, Response, UploadFile
 from fastapi.responses import StreamingResponse
-from app.database import neo4j_driver
+from app.database import neo4j_driver, db
 from app import config
 
 # Konfigurasi GSpread menggunakan Service Account Firebase yang sudah ada
@@ -259,22 +260,81 @@ async def export_to_excel(source_type: str, start_date: str = None, end_date: st
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-# =====================================================================
-# 3. GOOGLE SHEETS (LINK, SYNC, UNLINK)
-# =====================================================================
-async def link_to_sheets(email: str, source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
+async def link_to_sheets(email: str, source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True, existing_sheet_url: str = None):
+    if source_type not in ['app', 'instagram']:
+        raise HTTPException(status_code=400, detail="Pilihan sumber data (source_type) hanya boleh 'app' atau 'instagram'")
+
     gc = get_gspread_client()
     try:
-        sh = gc.create(f"SNA_Dataset_{source_type.upper()}_{pd.Timestamp.now().strftime('%Y%m%d')}")
-        sh.share(email, perm_type='user', role='writer')
+        # Cek apakah user memberikan URL Sheet yang sudah ada
+        if existing_sheet_url:
+            try:
+                # OPSI 2: Menggunakan Sheet yang sudah dibuat user
+                sh = gc.open_by_url(existing_sheet_url)
+                sheet_name = sh.title
+            except gspread.exceptions.SpreadsheetNotFound:
+                # Tangani error kosong dari gspread dan berikan instruksi jelas
+                sa_email = config.FIREBASE_CREDENTIALS.get("client_email", "firebase-adminsdk-bko4f@kp-ss-a8e05.iam.gserviceaccount.com")
+                raise HTTPException(
+                    status_code=403, 
+                    detail=f"Akses Ditolak! Anda belum membagikan Spreadsheet tersebut ke sistem. Buka Google Sheets Anda, klik 'Share/Bagikan', lalu tambahkan email ini sebagai Editor: {sa_email}"
+                )
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"URL Spreadsheet tidak valid: {str(e)}")
+        else:
+            # OPSI 1: Buat file baru dari nol
+            sheet_name = f"SNA_Dataset_{source_type.upper()}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
+            sh = gc.create(sheet_name)
+            sh.share(email, perm_type='user', role='writer')
         
+        # Ekstrak dan masukkan data
         df = get_master_dataframe(source_type, start_date, end_date, selected_columns, export_all)
         worksheet = sh.get_worksheet(0)
-        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
         
-        return {"status": "success", "message": "Spreadsheet berhasil dibuat", "sheet_url": sh.url, "sheet_id": sh.id}
+        if not df.empty:
+            if existing_sheet_url:
+                worksheet.clear() # Bersihkan isi sheet lama jika pakai opsi existing
+            worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+        
+        # Simpan metadata ke Firestore
+        doc_data = {
+            "sheet_id": sh.id,
+            "sheet_url": sh.url,
+            "sheet_name": sheet_name,
+            "source_type": source_type,
+            "shared_email": email,
+            "created_at": datetime.datetime.now().isoformat()
+        }
+        
+        _, doc_ref = db.collection('linked_sheets').add(doc_data)
+        
+        return {
+            "status": "success", 
+            "message": f"Data {source_type.upper()} berhasil ditautkan ke Spreadsheet.", 
+            "data": {
+                "id": doc_ref.id,
+                "sheet_name": sheet_name,
+                "source_type": source_type,
+                "status": "Linked"
+            }
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gagal link ke Sheets: {str(e)}")
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail=f"Gagal menautkan ke Sheets: {str(e)}")
+async def get_all_linked_sheets():
+    """Mengambil semua daftar spreadsheet untuk ditampilkan di List Frontend"""
+    try:
+        # Ambil dari Firestore, urutkan dari yang terbaru
+        docs = db.collection('linked_sheets').order_by('created_at', direction='DESCENDING').stream()
+        sheets = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            sheets.append(data)
+            
+        return {"status": "success", "data": sheets}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil daftar sheets: {str(e)}")
 
 async def sync_to_sheets(sheet_id: str, source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
     gc = get_gspread_client()
@@ -289,11 +349,55 @@ async def sync_to_sheets(sheet_id: str, source_type: str, start_date: str = None
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-async def unlink_sheets(sheet_id: str):
+async def unlink_sheets(doc_id: str):
+    """Unlink (Hapus) berdasarkan Document ID dari Firestore"""
     gc = get_gspread_client()
     try:
-        gc.del_spreadsheet(sheet_id)
-        return {"status": "success", "message": "Spreadsheet berhasil dihapus/di-unlink."}
+        doc_ref = db.collection('linked_sheets').document(doc_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Tautan sheet tidak ditemukan di database.")
+            
+        sheet_data = doc.to_dict()
+        sheet_id = sheet_data.get("sheet_id")
+        
+        # Hapus file secara fisik dari Drive Service Account
+        try:
+            gc.del_spreadsheet(sheet_id)
+        except Exception as e:
+            print(f"Warning: File mungkin sudah terhapus manual di Drive: {e}")
+            
+        # Hapus referensi dari Firestore (Unlink)
+        doc_ref.delete()
+        
+        return {"status": "success", "message": "Spreadsheet berhasil di-unlink."}
+    except Exception as e:
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def unlink_all_sheets():
+    """Menghapus SEMUA sheet yang ada di database (Clear All)"""
+    gc = get_gspread_client()
+    try:
+        docs = db.collection('linked_sheets').stream()
+        deleted_count = 0
+        
+        for doc in docs:
+            sheet_data = doc.to_dict()
+            sheet_id = sheet_data.get("sheet_id")
+            
+            # Hapus file fisiknya
+            try:
+                gc.del_spreadsheet(sheet_id)
+            except Exception as e:
+                pass # Abaikan jika file fisik sudah tidak ada
+            
+            # Hapus dari database
+            db.collection('linked_sheets').document(doc.id).delete()
+            deleted_count += 1
+            
+        return {"status": "success", "message": f"Berhasil menghapus (unlink) {deleted_count} sheets."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
