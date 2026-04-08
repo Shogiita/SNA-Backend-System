@@ -15,6 +15,8 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 NEO4J_API_URL = os.getenv("NEO4J_API_URL")
 NEO4J_ID = os.getenv("NEO4J_ID")
 
+GA_PROPERTY_ID = os.getenv("GA_PROPERTY_ID")
+
 GRAPH_API_VERSION = "v19.0" 
 GRAPH_API_URL = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 

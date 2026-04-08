@@ -16,3 +16,4 @@ gspread
 openpyxl
 google-auth
 python-multipart
+google-analytics-data

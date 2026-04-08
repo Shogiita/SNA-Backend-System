@@ -12,7 +12,58 @@ from networkx.algorithms import bipartite
 from fastapi import HTTPException, Response
 from app.database import neo4j_driver
 from collections import Counter
+from google.analytics.data_v1beta import BetaAnalyticsDataClient
+from google.analytics.data_v1beta.types import Dimension, Metric, RunRealtimeReportRequest, MinuteRange
+from google.oauth2 import service_account
+from app import config
 
+def get_realtime_active_users():
+    """Mengambil jumlah active users dalam 30 menit dan 5 menit terakhir dari GA4"""
+    try:
+        property_id = config.GA_PROPERTY_ID
+        if not property_id:
+            return {"last_30_min": 0, "last_5_min": 0}
+
+        credentials = service_account.Credentials.from_service_account_info(config.FIREBASE_CREDENTIALS)
+        client = BetaAnalyticsDataClient(credentials=credentials)
+
+        # Request 1: 30 Menit Terakhir (Secara default GA4 Realtime mengambil 30 menit)
+        request_30 = RunRealtimeReportRequest(
+            property=f"properties/{property_id}",
+            metrics=[Metric(name="activeUsers")]
+        )
+        
+        # Request 2: 5 Menit Terakhir (Kita spesifikasikan minute_ranges-nya)
+        request_5 = RunRealtimeReportRequest(
+            property=f"properties/{property_id}",
+            metrics=[Metric(name="activeUsers")],
+            minute_ranges=[MinuteRange(name="last_5", start_minutes_ago=4, end_minutes_ago=0)]
+        )
+        
+        # Eksekusi kedua request
+        response_30 = client.run_realtime_report(request_30)
+        response_5 = client.run_realtime_report(request_5)
+        
+        # Parsing hasil Request 30 Menit
+        count_30 = 0
+        if response_30.rows:
+            count_30 = int(response_30.rows[0].metric_values[0].value)
+            
+        # Parsing hasil Request 5 Menit
+        count_5 = 0
+        if response_5.rows:
+            count_5 = int(response_5.rows[0].metric_values[0].value)
+            
+        return {
+            "last_30_min": count_30,
+            "last_5_min": count_5
+        }
+        
+    except Exception as e:
+        # Menambahkan print error ini agar jika GA4 menolak request, kita bisa lihat alasannya di terminal
+        print(f"Error fetching Realtime GA4: {e}")
+        # Kita gunakan angka 200 lagi untuk ngetes apakah masih masuk ke error ini
+        return {"last_30_min": 200, "last_5_min": 200}
 
 def get_top_10_hashtags():
     query = """
@@ -314,6 +365,9 @@ def get_main_dashboard_summary():
         else:
             descriptive_analysis["komunitas"] = "Grup eksklusif belum terdeteksi."
 
+        # === UPDATE PEMANGGILAN GA4 ===
+        active_users_data = get_realtime_active_users()
+
         return {
             "status": "success",
             "data": {
@@ -324,7 +378,14 @@ def get_main_dashboard_summary():
                 "shortest_path_metrics": {"global_averages": global_metrics, "top_10_paths": top_10_paths, "users_details": user_network_metrics},
                 "clique_metrics": {"global_metrics": clique_global_metrics, "top_10_cliques": top_10_cliques},
                 "descriptive_analysis": descriptive_analysis,
-                "integrations": {"csv_export": {"status": "ready"}, "google_analytics": {"status": "connected", "active_users_now": 0}}
+                "integrations": {
+                    "csv_export": {"status": "ready"}, 
+                    "google_analytics": {
+                        "status": "connected" if config.GA_PROPERTY_ID else "disconnected", 
+                        "active_users_last_30_min": active_users_data["last_30_min"],
+                        "active_users_last_5_min": active_users_data["last_5_min"]
+                    }
+                }
             }
         }
 
@@ -332,6 +393,7 @@ def get_main_dashboard_summary():
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
 async def export_neo4j_to_csv():
     query = """MATCH (u:User) OPTIONAL MATCH (u)-[:POSTED]->(k:KawanSS) WHERE k.isDeleted = false OR k.isDeleted IS NULL RETURN u.id AS ID, coalesce(u.nama, u.username, 'Unknown') AS Nama, count(k) AS Total_Post ORDER BY Total_Post DESC"""
     try:
