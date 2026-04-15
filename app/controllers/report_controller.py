@@ -6,7 +6,10 @@ import re
 import asyncio
 import itertools
 import random
-from datetime import datetime, timedelta
+import time
+import calendar
+from dateutil import parser
+from datetime import datetime, timezone
 import networkx as nx
 from networkx.algorithms import bipartite
 from fastapi import HTTPException, Response
@@ -65,6 +68,219 @@ def get_realtime_active_users():
         # Kita gunakan angka 200 lagi untuk ngetes apakah masih masuk ke error ini
         return {"last_30_min": 200, "last_5_min": 200}
 
+# ==========================================
+# 2. API TOP CONTENT (Dengan Filter Tanggal)
+# ==========================================
+def get_top_content_summary(source: str = "app", start_date: str = None, end_date: str = None):
+    try:
+        now = datetime.now()
+        
+        # 1. LOGIKA FILTER TANGGAL (Custom vs Default Bulan Ini)
+        if start_date:
+            start_dt = parser.parse(start_date).replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            # Default: Tanggal 1 bulan ini
+            start_dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        if end_date:
+            end_dt = parser.parse(end_date).replace(hour=23, minute=59, second=59, microsecond=0)
+        else:
+            # Default: Hari terakhir bulan ini
+            last_day_of_month = calendar.monthrange(now.year, now.month)[1]
+            end_dt = now.replace(day=last_day_of_month, hour=23, minute=59, second=59, microsecond=0)
+
+        # 2. FORMATTING TANGGAL UNTUK DATABASE
+        # Format untuk Instagram (ISO dengan Timezone +0000)
+        ig_iso_start = start_dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+0000')
+        ig_iso_end = end_dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+0000')
+        
+        # Format untuk App / Suara Surabaya (ISO Naive & Epoch)
+        iso_start = start_dt.isoformat()
+        iso_end = end_dt.isoformat()
+        epoch_start = int(start_dt.timestamp() * 1000)
+        epoch_end = int(end_dt.timestamp() * 1000)
+
+        # 3. QUERY CYPHER BERDASARKAN RENTANG WAKTU
+        if source == "instagram":
+            top_query = """
+            MATCH (i:InstagramPost) 
+            WHERE i.timestamp >= $start_iso AND i.timestamp <= $end_iso
+            RETURN i.id AS id, coalesce(substring(i.caption, 0, 150), 'No Caption') AS judul, 
+                   0 AS jumlahView, 'Instagram' AS kategori, coalesce(i.permalink, '') AS gambar, 
+                   i.timestamp AS uploadDate, coalesce(toInteger(i.comments_count), 0) AS jumlahComment, 
+                   coalesce(toInteger(i.like_count), 0) AS jumlahLike 
+            ORDER BY jumlahLike DESC LIMIT 10
+            """
+            ht_query = """
+            MATCH (p:InstagramPost) 
+            WHERE p.caption IS NOT NULL AND p.caption CONTAINS '#'
+              AND p.timestamp >= $start_iso AND p.timestamp <= $end_iso
+            RETURN p.caption AS text LIMIT 5000
+            """
+        else:
+            top_query = """
+            MATCH (i:Infoss) 
+            WHERE (i.isDeleted = false OR i.isDeleted IS NULL)
+              AND (i.uploadDate >= $iso_start OR i.createdAt >= $iso_start)
+              AND (i.uploadDate <= $iso_end OR i.createdAt <= $iso_end)
+            RETURN i.id AS id, coalesce(i.judul, i.title, 'No Title') AS judul, 
+                   coalesce(toInteger(i.jumlahView), 0) AS jumlahView, coalesce(i.kategori, 'Umum') AS kategori, 
+                   coalesce(i.gambar, '') AS gambar, i.uploadDate AS uploadDate, 
+                   coalesce(toInteger(i.jumlahComment), 0) AS jumlahComment, coalesce(toInteger(i.jumlahLike), 0) AS jumlahLike 
+            ORDER BY jumlahView DESC LIMIT 10
+            """
+            ht_query = """
+            MATCH (p:KawanSS) 
+            WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND p.deskripsi IS NOT NULL AND p.deskripsi CONTAINS '#'
+              AND p.createdAt >= $epoch_start AND p.createdAt <= $epoch_end
+            RETURN p.deskripsi AS text LIMIT 5000
+            UNION ALL 
+            MATCH (p:Infoss) 
+            WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND coalesce(p.detail, p.judul, '') CONTAINS '#'
+              AND (p.uploadDate >= $iso_start OR p.createdAt >= $iso_start)
+              AND (p.uploadDate <= $iso_end OR p.createdAt <= $iso_end)
+            RETURN coalesce(p.detail, p.judul, '') AS text LIMIT 5000
+            """
+
+        with neo4j_driver.session() as session:
+            if source == "instagram":
+                top_content = session.run(top_query, start_iso=ig_iso_start, end_iso=ig_iso_end).data()
+                ht_records = session.run(ht_query, start_iso=ig_iso_start, end_iso=ig_iso_end).data()
+            else:
+                top_content = session.run(top_query, iso_start=iso_start, iso_end=iso_end).data()
+                ht_records = session.run(ht_query, iso_start=iso_start, iso_end=iso_end, epoch_start=epoch_start, epoch_end=epoch_end).data()
+
+        # Proses Regex Hashtag
+        hashtag_pattern = re.compile(r'#\w+')
+        all_hashtags = []
+        for r in ht_records:
+            if r.get('text'): all_hashtags.extend(hashtag_pattern.findall(r.get('text').lower()))
+        top_10_hashtags = [{"hashtag": tag, "count": count} for tag, count in Counter(all_hashtags).most_common(10)]
+
+        # Info indikator untuk frontend
+        date_range_info = {
+            "start": start_dt.strftime('%Y-%m-%d %H:%M:%S'),
+            "end": end_dt.strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+        return {
+            "status": "success", 
+            "source_active": source, 
+            "date_range": date_range_info,
+            "data": {
+                "top_content": top_content, 
+                "top_10_hashtags": top_10_hashtags
+            }
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
+
+def get_network_metrics_summary(source: str = "app"):
+    try:
+        t_start = time.perf_counter()
+        
+        if source == "instagram":
+            sna_query = """
+            MATCH (u:User)-[:POSTED_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
+            UNION ALL MATCH (u:User)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
+            UNION ALL MATCH (u:User)-[:WROTE_IG]->(reply:InstagramComment)-[:REPLIED_TO_IG]->(comment:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
+            """
+        else:
+            sna_query = """
+            MATCH (u:User)-[:POSTED]->(p:KawanSS) WHERE u.id <> 'unknown_user' RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
+            UNION ALL MATCH (u:User)-[:WROTE]->(c:KawanssComment)-[:COMMENTED_ON]->(p:KawanSS) WHERE u.id <> 'unknown_user' RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
+            UNION ALL MATCH (u:User)-[:WROTE]->(c:InfossComment)-[:COMMENTED_ON]->(p:Infoss) WHERE u.id <> 'unknown_user' RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
+            """
+
+        with neo4j_driver.session() as session:
+            sna_records = session.run(sna_query).data()
+
+        top_10_centrality = {"degree": [], "betweenness": [], "closeness": [], "eigenvector": []}
+        top_10_paths = []
+        global_metrics = {"average_of_average_degrees": 0.0, "average_of_network_diameters": 0.0, "average_of_connected_users": 0.0}
+        clique_metrics = {"global_metrics": {"total_cliques": 0}, "top_10_cliques": []}
+        descriptive_analysis = {"pola_interaksi": "Belum cukup data", "aktor_pengaruh": "", "komunitas": ""}
+
+        G = nx.Graph()
+        for r in sna_records:
+            uid = str(r['uid']).strip()
+            if uid == 'unknown_user': continue  
+            u_node, p_node = f"user_{uid}", f"post_{r['pid']}"
+            G.add_node(u_node, type="user", name=str(r['uname']), username=str(r['username']), bipartite=0)
+            G.add_node(p_node, type="post", bipartite=1)       
+            if G.has_edge(u_node, p_node): G[u_node][p_node]['weight'] += 1
+            else: G.add_edge(u_node, p_node, weight=1)
+
+        user_nodes = [n for n, d in G.nodes(data=True) if d.get('type') == 'user']
+        
+        if user_nodes:
+            G_user = bipartite.projected_graph(G, user_nodes)
+            components = sorted(nx.connected_components(G_user), key=len, reverse=True)
+            
+            all_cliques = []
+            if len(G_user.nodes()) < 500: 
+                all_cliques = [c for c in nx.find_cliques(G_user) if len(c) >= 3]
+            
+            deg_cent = nx.degree_centrality(G)
+            bet_cent = nx.betweenness_centrality(G, k=min(20, len(G.nodes())), weight='weight')
+            
+            top_10_centrality["degree"] = [{"id": n.replace('user_',''), "username": G.nodes[n].get('username', ''), "metrics": {"degree": round(v,4)}} for n, v in sorted(deg_cent.items(), key=lambda x: x[1], reverse=True) if n.startswith('user_')][:10]
+            top_10_centrality["betweenness"] = [{"id": n.replace('user_',''), "username": G.nodes[n].get('username', ''), "metrics": {"betweenness": round(v,4)}} for n, v in sorted(bet_cent.items(), key=lambda x: x[1], reverse=True) if n.startswith('user_')][:10]
+
+            if components and len(components[0]) > 2:
+                comp = list(components[0])
+                sample_pairs = list(itertools.combinations(comp[:15], 2))
+                random.shuffle(sample_pairs)
+                for u1, u2 in sample_pairs[:10]:
+                    try:
+                        path = nx.shortest_path(G, u1, u2)
+                        p_str = " ➔ ".join([G.nodes[n].get('username', n) if n.startswith("user_") else f"[Post]" for n in path])
+                        top_10_paths.append({"source_username": G.nodes[u1].get('username'), "target_username": G.nodes[u2].get('username'), "distance_hops": int((len(path)-1)/2), "path_details": p_str})
+                    except nx.NetworkXNoPath: pass
+
+            if all_cliques:
+                all_cliques.sort(key=len, reverse=True)
+                clique_metrics["global_metrics"] = {"total_cliques": len(all_cliques), "largest_clique_size": len(all_cliques[0])}
+                clique_metrics["top_10_cliques"] = [{"rank": i+1, "size": len(c), "members": [{"username": G.nodes[u].get('username')} for u in c]} for i, c in enumerate(all_cliques[:10])]
+
+        process_time = round(time.perf_counter() - t_start, 3)
+
+        return {
+            "status": "success", "source_active": source, "process_time_sec": process_time,
+            "data": {
+                "top_10_centrality": top_10_centrality,
+                "shortest_path_metrics": {"top_10_paths": top_10_paths, "global_averages": global_metrics},
+                "clique_metrics": clique_metrics,
+                "descriptive_analysis": descriptive_analysis
+            }
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
+
+def get_live_analytics_summary():
+    try:
+        # Dummy fallback - Sesuaikan dengan fungsi GA4 riil Anda jika ada
+        active_users_data = {"last_30_min": 0, "last_5_min": 0} 
+        
+        return {
+            "status": "success",
+            "data": {
+                "integrations": {
+                    "google_analytics": {
+                        "status": "connected" if config.GA_PROPERTY_ID else "disconnected", 
+                        "active_users_last_30_min": active_users_data["last_30_min"],
+                        "active_users_last_5_min": active_users_data["last_5_min"]
+                    }
+                }
+            }
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 def get_top_10_hashtags():
     query = """
     MATCH (p:KawanSS)
@@ -98,12 +314,57 @@ def get_top_10_hashtags():
 
 
 def get_first_day_of_last_month(dt):
-    if dt.month == 1:
-        return dt.replace(year=dt.year - 1, month=12, day=1, hour=0, minute=0, second=0, microsecond=0)
-    return dt.replace(month=dt.month - 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    first_day_of_current_month = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    last_day_of_last_month = first_day_of_current_month - timedelta(days=1)
+    return last_day_of_last_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+def get_stats_summary(source: str = "app"):
+    try:
+        now = datetime.now()
+        iso_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        iso_last_month = get_first_day_of_last_month(now).isoformat()
+        iso_30_days_ago = (now - timedelta(days=30)).isoformat()
+        epoch_30_days_ago = int((now - timedelta(days=30)).timestamp() * 1000)
+
+        if source == "instagram":
+            query = """
+            CALL { MATCH (u:User)-[:POSTED_IG|WROTE_IG]->() RETURN count(DISTINCT u) AS total_users }
+            CALL { MATCH (i:InstagramPost) RETURN count(i) AS total_infoss }
+            CALL { MATCH (c:InstagramComment) RETURN count(c) AS total_kawanss }
+            RETURN total_users, total_infoss, total_kawanss, 0 AS new_users_this_month, 0 AS new_users_last_month, 0 AS new_infoss_30_days, 0 AS new_kawanss_30_days
+            """
+        else:
+            query = """
+            CALL { MATCH (u:User) RETURN count(u) AS total_users }
+            CALL { MATCH (i:Infoss) RETURN count(i) AS total_infoss }
+            CALL { MATCH (k:KawanSS) RETURN count(k) AS total_kawanss }
+            CALL { MATCH (u:User) WHERE u.createdAt >= $iso_this_month OR u.joinDate >= $iso_this_month RETURN count(u) AS new_users_this_month }
+            CALL { MATCH (u:User) WHERE (u.createdAt >= $iso_last_month AND u.createdAt < $iso_this_month) OR (u.joinDate >= $iso_last_month AND u.joinDate < $iso_this_month) RETURN count(u) AS new_users_last_month }
+            CALL { MATCH (k:KawanSS) WHERE (k.isDeleted = false OR k.isDeleted IS NULL) AND k.createdAt >= $epoch_30_days_ago RETURN count(k) AS new_kawanss_30_days }
+            CALL { MATCH (i:Infoss) WHERE (i.isDeleted = false OR i.isDeleted IS NULL) AND (i.uploadDate >= $iso_30_days_ago OR i.createdAt >= $iso_30_days_ago) RETURN count(i) AS new_infoss_30_days }
+            RETURN total_users, total_infoss, total_kawanss, new_users_this_month, new_users_last_month, new_infoss_30_days, new_kawanss_30_days
+            """
+
+        with neo4j_driver.session() as session:
+            res = session.run(query, iso_this_month=iso_this_month, iso_last_month=iso_last_month, iso_30_days_ago=iso_30_days_ago, epoch_30_days_ago=epoch_30_days_ago).single()
+
+        new_this_month = res["new_users_this_month"]
+        new_last_month = res["new_users_last_month"]
+        growth = (new_this_month / new_last_month) * 100 if new_last_month > 0 else (100.0 if new_this_month > 0 else 0.0)
+
+        return {
+            "status": "success", "source_active": source,
+            "data": {
+                "users": {"total": res["total_users"], "new_this_month": new_this_month, "new_last_month": new_last_month, "growth_percentage": round(growth, 2)},
+                "posts": {"total": res["total_infoss"], "new_30_days": res["new_infoss_30_days"], "total_kawn_ss": res["total_kawanss"], "new_30_days_kawanss": res["new_kawanss_30_days"]}
+            }
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
-def get_main_dashboard_summary():
+        
+def get_main_dashboard_summary(source: str = "app"):
     try:
         now = datetime.now()
         first_day_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -118,46 +379,103 @@ def get_main_dashboard_summary():
         epoch_last_month  = int(first_day_last_month.timestamp() * 1000)
         epoch_30_days_ago = int(thirty_days_ago.timestamp() * 1000)
 
-        stats_query = """
-        CALL { MATCH (u:User) RETURN count(u) AS total_users }
-        CALL { MATCH (i:Infoss) RETURN count(i) AS total_infoss }
-        CALL { MATCH (k:KawanSS) RETURN count(k) AS total_kawanss }
-        CALL { MATCH (u:User) WHERE u.createdAt >= $iso_this_month OR u.joinDate >= $iso_this_month RETURN count(u) AS new_users_this_month }
-        CALL { MATCH (u:User) WHERE (u.createdAt >= $iso_last_month AND u.createdAt < $iso_this_month) OR (u.joinDate >= $iso_last_month AND u.joinDate < $iso_this_month) RETURN count(u) AS new_users_last_month }
-        CALL { MATCH (k:KawanSS) WHERE (k.isDeleted = false OR k.isDeleted IS NULL) AND k.createdAt >= $epoch_30_days_ago RETURN count(k) AS new_kawanss_30_days }
-        CALL { MATCH (i:Infoss) WHERE (i.isDeleted = false OR i.isDeleted IS NULL) AND (i.uploadDate >= $iso_30_days_ago OR i.createdAt >= $iso_30_days_ago) RETURN count(i) AS new_infoss_30_days }
-        RETURN total_users, total_infoss, total_kawanss, new_users_this_month, new_users_last_month, new_infoss_30_days, new_kawanss_30_days
-        """
+        if source == "instagram":
+            stats_query = """
+            CALL { MATCH (u:User)-[:POSTED_IG|WROTE_IG]->() RETURN count(DISTINCT u) AS total_users }
+            CALL { MATCH (i:InstagramPost) RETURN count(i) AS total_infoss }
+            CALL { MATCH (c:InstagramComment) RETURN count(c) AS total_kawanss }
+            RETURN total_users, total_infoss, total_kawanss, 0 AS new_users_this_month, 0 AS new_users_last_month, 0 AS new_infoss_30_days, 0 AS new_kawanss_30_days
+            """
 
-        top_content_query = """
-        MATCH (i:Infoss)
-        WHERE i.isDeleted = false OR i.isDeleted IS NULL
-        RETURN i.id AS id, coalesce(i.judul, i.title, 'No Title') AS judul, coalesce(toInteger(i.jumlahView), 0) AS jumlahView, coalesce(i.kategori, 'Umum') AS kategori, coalesce(i.gambar, '') AS gambar, i.uploadDate AS uploadDate, coalesce(toInteger(i.jumlahComment), 0) AS jumlahComment, coalesce(toInteger(i.jumlahLike), 0) AS jumlahLike
-        ORDER BY jumlahView DESC LIMIT 10
-        """
-        
-        sna_query = """
-        MATCH (u:User)-[:POSTED]->(p:KawanSS) WHERE u.id <> 'unknown_user'
-        RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
-        UNION ALL
-        MATCH (u:User)-[:WROTE]->(c:KawanssComment)-[:COMMENTED_ON]->(p:KawanSS) WHERE u.id <> 'unknown_user'
-        RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
-        UNION ALL
-        MATCH (u:User)-[:WROTE]->(c:InfossComment)-[:COMMENTED_ON]->(p:Infoss) WHERE u.id <> 'unknown_user'
-        RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
-        """
+            top_content_query = """
+            MATCH (i:InstagramPost)
+            RETURN i.id AS id, 
+                   coalesce(substring(i.caption, 0, 150), 'No Caption') AS judul, 
+                   0 AS jumlahView, 
+                   'Instagram' AS kategori, 
+                   coalesce(i.permalink, '') AS gambar, 
+                   i.timestamp AS uploadDate, 
+                   coalesce(toInteger(i.comments_count), 0) AS jumlahComment, 
+                   coalesce(toInteger(i.like_count), 0) AS jumlahLike
+            ORDER BY jumlahLike DESC LIMIT 10
+            """
+            
+            sna_query = """
+            MATCH (u:User)-[:POSTED_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL
+            RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
+            UNION ALL
+            MATCH (u:User)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL
+            RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
+            UNION ALL
+            MATCH (u:User)-[:WROTE_IG]->(reply:InstagramComment)-[:REPLIED_TO_IG]->(comment:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL
+            RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
+            """
+
+            hashtag_query = """
+            MATCH (p:InstagramPost)
+            WHERE p.caption IS NOT NULL AND p.caption CONTAINS '#'
+            RETURN p.caption AS text
+            LIMIT 5000
+            """
+        else:
+            stats_query = """
+            CALL { MATCH (u:User) RETURN count(u) AS total_users }
+            CALL { MATCH (i:Infoss) RETURN count(i) AS total_infoss }
+            CALL { MATCH (k:KawanSS) RETURN count(k) AS total_kawanss }
+            CALL { MATCH (u:User) WHERE u.createdAt >= $iso_this_month OR u.joinDate >= $iso_this_month RETURN count(u) AS new_users_this_month }
+            CALL { MATCH (u:User) WHERE (u.createdAt >= $iso_last_month AND u.createdAt < $iso_this_month) OR (u.joinDate >= $iso_last_month AND u.joinDate < $iso_this_month) RETURN count(u) AS new_users_last_month }
+            CALL { MATCH (k:KawanSS) WHERE (k.isDeleted = false OR k.isDeleted IS NULL) AND k.createdAt >= $epoch_30_days_ago RETURN count(k) AS new_kawanss_30_days }
+            CALL { MATCH (i:Infoss) WHERE (i.isDeleted = false OR i.isDeleted IS NULL) AND (i.uploadDate >= $iso_30_days_ago OR i.createdAt >= $iso_30_days_ago) RETURN count(i) AS new_infoss_30_days }
+            RETURN total_users, total_infoss, total_kawanss, new_users_this_month, new_users_last_month, new_infoss_30_days, new_kawanss_30_days
+            """
+
+            top_content_query = """
+            MATCH (i:Infoss)
+            WHERE i.isDeleted = false OR i.isDeleted IS NULL
+            RETURN i.id AS id, coalesce(i.judul, i.title, 'No Title') AS judul, coalesce(toInteger(i.jumlahView), 0) AS jumlahView, coalesce(i.kategori, 'Umum') AS kategori, coalesce(i.gambar, '') AS gambar, i.uploadDate AS uploadDate, coalesce(toInteger(i.jumlahComment), 0) AS jumlahComment, coalesce(toInteger(i.jumlahLike), 0) AS jumlahLike
+            ORDER BY jumlahView DESC LIMIT 10
+            """
+            
+            sna_query = """
+            MATCH (u:User)-[:POSTED]->(p:KawanSS) WHERE u.id <> 'unknown_user'
+            RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
+            UNION ALL
+            MATCH (u:User)-[:WROTE]->(c:KawanssComment)-[:COMMENTED_ON]->(p:KawanSS) WHERE u.id <> 'unknown_user'
+            RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
+            UNION ALL
+            MATCH (u:User)-[:WROTE]->(c:InfossComment)-[:COMMENTED_ON]->(p:Infoss) WHERE u.id <> 'unknown_user'
+            RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
+            """
+
+            hashtag_query = """
+            MATCH (p:KawanSS)
+            WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND p.deskripsi IS NOT NULL AND p.deskripsi CONTAINS '#'
+            RETURN p.deskripsi AS text LIMIT 5000
+            UNION ALL
+            MATCH (p:Infoss)
+            WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND coalesce(p.detail, p.judul, '') CONTAINS '#'
+            RETURN coalesce(p.detail, p.judul, '') AS text LIMIT 5000
+            """
 
         with neo4j_driver.session() as session:
             stats_res = session.run(stats_query, iso_this_month=iso_this_month, iso_last_month=iso_last_month, iso_30_days_ago=iso_30_days_ago, epoch_30_days_ago=epoch_30_days_ago).single()
             top_content_res = session.run(top_content_query).data()
             sna_records = session.run(sna_query).data()
+            ht_records = session.run(hashtag_query).data()
+
+        hashtag_pattern = re.compile(r'#\w+')
+        all_hashtags = []
+        for r in ht_records:
+            text = r.get('text')
+            if text:
+                all_hashtags.extend(hashtag_pattern.findall(text.lower()))
+        top_10_hashtags = [{"hashtag": tag, "count": count} for tag, count in Counter(all_hashtags).most_common(10)]
 
         total_users = stats_res["total_users"]
         new_this_month = stats_res["new_users_this_month"]
         new_last_month = stats_res["new_users_last_month"]
         user_growth_percent = (new_this_month / new_last_month) * 100 if new_last_month > 0 else (100.0 if new_this_month > 0 else 0.0)
 
-        # Struktur Metrik sesuai Note
         top_10_centrality = {"degree": [], "betweenness": [], "closeness": [], "eigenvector": []}
         user_network_metrics = []
         user_metrics_lookup = {}
@@ -200,7 +518,6 @@ def get_main_dashboard_summary():
                 for comp in components:
                     G_sub = G_user_1mode.subgraph(comp)
                     
-                    # 1. Clique Detection
                     comp_cliques = list(nx.find_cliques(G_sub))
                     valid_comp_cliques = [c for c in comp_cliques if len(c) >= 3]
                     all_cliques.extend(valid_comp_cliques)
@@ -213,7 +530,6 @@ def get_main_dashboard_summary():
                             if c_size > comp_user_clique_info[u]["largest"]:
                                 comp_user_clique_info[u]["largest"] = c_size
 
-                    # 2. Shortest Path (Geodesic)
                     lengths = dict(nx.all_pairs_shortest_path_length(G_sub))
                     
                     for u in comp:
@@ -297,9 +613,6 @@ def get_main_dashboard_summary():
 
                 user_network_metrics = sorted(user_network_metrics, key=lambda x: x["connected_users_in_lcc"], reverse=True)
 
-                # =================================================================
-                # === CENTRALITY CALCULATIONS (Eksak Sesuai Scope) ===
-                # =================================================================
                 for u, v, d in G.edges(data=True):
                     d['distance'] = 1.0 / d['weight'] if d['weight'] > 0 else 1.0
 
@@ -307,7 +620,6 @@ def get_main_dashboard_summary():
                 bet_cent  = nx.betweenness_centrality(G, weight='distance')
                 clo_cent  = nx.closeness_centrality(G, distance='distance')
                 
-                # Eigenvector Centrality sesuai Note
                 try:
                     eig_cent = nx.eigenvector_centrality(G, weight='weight', max_iter=1000, tol=1e-03)
                 except Exception:
@@ -332,9 +644,6 @@ def get_main_dashboard_summary():
         except Exception as sna_err:
             print(f"SNA Calculation error on dashboard: {sna_err}")
 
-        # =================================================================
-        # === DESCRIPTIVE ANALYSIS GENERATOR (Rule-Based) ===
-        # =================================================================
         descriptive_analysis = {
             "pola_interaksi": "",
             "aktor_pengaruh": "",
@@ -365,15 +674,16 @@ def get_main_dashboard_summary():
         else:
             descriptive_analysis["komunitas"] = "Grup eksklusif belum terdeteksi."
 
-        # === UPDATE PEMANGGILAN GA4 ===
         active_users_data = get_realtime_active_users()
 
         return {
             "status": "success",
             "data": {
+                "source_active": source,
                 "users": {"total": total_users, "total_post": stats_res["total_infoss"], "total_post_kawanss": stats_res["total_kawanss"], "new_this_month": new_this_month, "new_last_month": new_last_month, "growth_percentage": round(user_growth_percent, 2)},
                 "posts": {"total": stats_res["total_infoss"], "new_30_days": stats_res["new_infoss_30_days"], "total_kawn_ss": stats_res["total_kawanss"], "new_30_days_kawanss": stats_res["new_kawanss_30_days"]},
                 "top_content": top_content_res,
+                "top_10_hashtags": top_10_hashtags,
                 "top_10_centrality": top_10_centrality,
                 "shortest_path_metrics": {"global_averages": global_metrics, "top_10_paths": top_10_paths, "users_details": user_network_metrics},
                 "clique_metrics": {"global_metrics": clique_global_metrics, "top_10_cliques": top_10_cliques},
@@ -393,7 +703,7 @@ def get_main_dashboard_summary():
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 async def export_neo4j_to_csv():
     query = """MATCH (u:User) OPTIONAL MATCH (u)-[:POSTED]->(k:KawanSS) WHERE k.isDeleted = false OR k.isDeleted IS NULL RETURN u.id AS ID, coalesce(u.nama, u.username, 'Unknown') AS Nama, count(k) AS Total_Post ORDER BY Total_Post DESC"""
     try:

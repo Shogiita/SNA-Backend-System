@@ -12,6 +12,17 @@ async def create_new_user(user_data: dict):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+# async def get_user_by_id(user_id: str):
+#     try:
+#         doc_ref = db.collection('users').document(user_id)
+#         doc = await asyncio.to_thread(doc_ref.get)
+#         if doc.exists:
+#             return doc.to_dict()
+#         else:
+#             raise HTTPException(status_code=404, detail="Pengguna tidak ditemukan")
+#     except Exception as e:
+#         raise HTTPException(status_code=400, detail=str(e))
+
 async def get_user_by_id(user_id: str):
     try:
         doc_ref = db.collection('users').document(user_id)
@@ -20,8 +31,10 @@ async def get_user_by_id(user_id: str):
             return doc.to_dict()
         else:
             raise HTTPException(status_code=404, detail="Pengguna tidak ditemukan")
+    except HTTPException:
+        raise # <-- Biarkan HTTPException (seperti 404) lolos ke atas
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) #
 
 async def get_all_users_from_db(limit: int = None):
     """Logika untuk mengambil pengguna dari koleksi 'users'."""

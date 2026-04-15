@@ -20,6 +20,8 @@ from collections import Counter, defaultdict
 from fastapi import HTTPException, BackgroundTasks
 from app.database import neo4j_driver
 import calendar
+import traceback 
+from apscheduler.schedulers.background import BackgroundScheduler
 
 CACHE_FILE = "instagram_data_cache.json"
 OUTPUT_HTML_DIR = "generated_graphs"
@@ -27,6 +29,8 @@ OUTPUT_HTML_DIR = "generated_graphs"
 MAX_POSTS_TO_FETCH = 1000
 FETCH_MONTHS_BACK = 12
 MAX_WORKERS = 10
+
+HASHTAG_REGEX = re.compile(r"#(\w+)")
 
 os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
 import time
@@ -41,19 +45,188 @@ from app import config
 # Gunakan Session untuk mempercepat koneksi (Connection Pooling)
 session = requests.Session()
 
-def get_instagram_metrics(start_date: str = None, end_date: str = None):
-    start_time = time.time()
+def _process_ig_to_neo4j_batch(posts_batch, comments_batch):
+    """Fungsi helper untuk memasukkan data ke Neo4j secara batching"""
+    post_query = """
+    UNWIND $posts AS post
+    MERGE (p:InstagramPost {id: post.id})
+    SET p.caption = post.caption,
+        p.permalink = post.permalink,
+        p.media_type = post.media_type,
+        p.like_count = post.like_count,
+        p.comments_count = post.comments_count,
+        p.share_count = post.share_count, // Placeholder API limit
+        p.view_count = post.view_count,   // Placeholder API limit
+        p.timestamp = post.timestamp
     
+    // Asosiasi User Pembuat Post
+    MERGE (u:User {username: post.username})
+    MERGE (u)-[:POSTED_IG]->(p)
+    """
+
+    comment_query = """
+    UNWIND $comments AS comm
+    MERGE (c:InstagramComment {id: comm.id})
+    SET c.text = comm.text,
+        c.likes = comm.likes,
+        c.timestamp = comm.timestamp,
+        c.type = comm.type,
+        c.replies_count = comm.replies_count
+        
+    // Asosiasi User Penulis Komen
+    MERGE (u:User {username: comm.username})
+    MERGE (u)-[:WROTE_IG]->(c)
+    
+    // Relasi ke Postingan atau ke Komentar Induk (Reply)
+    WITH c, comm
+    CALL {
+        WITH c, comm
+        WITH c, comm WHERE comm.type = 'COMMENT'
+        MERGE (p:InstagramPost {id: comm.target_id})
+        MERGE (c)-[:COMMENTED_ON_IG]->(p)
+    }
+    CALL {
+        WITH c, comm
+        WITH c, comm WHERE comm.type = 'REPLY'
+        MERGE (parent:InstagramComment {id: comm.target_id})
+        MERGE (c)-[:REPLIED_TO_IG]->(parent)
+    }
+    """
+    
+    try:
+        with neo4j_driver.session() as session:
+            if posts_batch:
+                session.run(post_query, posts=posts_batch)
+            if comments_batch:
+                session.run(comment_query, comments=comments_batch)
+    except Exception as e:
+        print(f"[NEO4J ERROR] Gagal insert batch: {e}")
+
+def sync_instagram_to_neo4j(is_initial_sync=False):
+    """
+    Fungsi utama untuk menarik data dan memasukannya ke Neo4j.
+    Jika is_initial_sync = True, tarik data 1 tahun ke belakang.
+    Jika False, cukup tarik beberapa jam terakhir untuk efisiensi update.
+    """
+    print(f"🔄 Memulai Sinkronisasi IG ke Neo4j. Initial Sync: {is_initial_sync}")
+    
+    end_date = datetime.now(timezone.utc)
+    if is_initial_sync:
+        # Tarik data 1 Tahun ke belakang (Sesuai request sampai April 2025)
+        start_date = end_date - relativedelta(years=1) 
+        max_posts = 5000 # Angka aman untuk setahun
+    else:
+        # Untuk update harian/jam, cukup cek 2 hari ke belakang agar mengcover komen baru
+        start_date = end_date - relativedelta(days=2)
+        max_posts = 100
+
     url = f"{config.GRAPH_API_URL}/{config.IG_BUSINESS_ACCOUNT_ID}/media"
     params = {
         "access_token": config.IG_ACCESS_TOKEN,
-        "fields": "id,caption,permalink,timestamp,like_count,comments_count",
-        "limit": 100 
+        "fields": "id,caption,media_type,media_url,permalink,timestamp,like_count,comments_count,username",
+        "limit": 50
     }
+    
+    posts_batch = []
+    comments_batch = []
+    batch_size = 100
 
+    try:
+        while url:
+            resp = session.get(url, params=params)
+            data = resp.json()
+            if 'error' in data or 'data' not in data: 
+                break
+                
+            stop_fetching = False
+            for post in data['data']:
+                post_time = parser.isoparse(post['timestamp'])
+                if post_time < start_date:
+                    stop_fetching = True
+                    break
+                
+                # 1. Siapkan Data Post
+                posts_batch.append({
+                    "id": post.get('id'),
+                    "username": post.get('username', 'Suara_Surabaya_Official'),
+                    "caption": post.get('caption', ''),
+                    "permalink": post.get('permalink', ''),
+                    "media_type": post.get('media_type', 'UNKNOWN'),
+                    "like_count": post.get('like_count', 0),
+                    "comments_count": post.get('comments_count', 0),
+                    "share_count": 0, # Limitasi Graph API dasar
+                    "view_count": 0,  # Limitasi Graph API dasar
+                    "timestamp": post.get('timestamp')
+                })
+
+                # 2. Tarik Data Komentar dan Reply
+                if post.get('comments_count', 0) > 0:
+                    comm_url = f"{config.GRAPH_API_URL}/{post['id']}/comments"
+                    comm_params = {
+                        "access_token": config.IG_ACCESS_TOKEN, 
+                        "fields": "id,text,username,like_count,timestamp,replies{id,text,username,like_count,timestamp}",
+                        "limit": 50
+                    }
+                    try:
+                        comm_resp = session.get(comm_url, params=comm_params)
+                        comm_data = comm_resp.json().get('data', [])
+                        
+                        for c in comm_data:
+                            replies_data = c.get('replies', {}).get('data', [])
+                            
+                            # Komen Utama (Table/Node Komentar)
+                            comments_batch.append({
+                                "id": c['id'],
+                                "target_id": post['id'],
+                                "type": "COMMENT",
+                                "text": c.get('text', ''),
+                                "username": c.get('username', 'Unknown'),
+                                "likes": c.get('like_count', 0),
+                                "replies_count": len(replies_data),
+                                "timestamp": c.get('timestamp')
+                            })
+                            
+                            # Balasan Komen (Table/Node Komentar tapi tipe REPLY)
+                            for r in replies_data:
+                                comments_batch.append({
+                                    "id": r['id'],
+                                    "target_id": c['id'], # Relasikan ke Parent ID (Komentar utamanya)
+                                    "type": "REPLY",
+                                    "text": r.get('text', ''),
+                                    "username": r.get('username', 'Unknown'),
+                                    "likes": r.get('like_count', 0),
+                                    "replies_count": 0,
+                                    "timestamp": r.get('timestamp')
+                                })
+                    except Exception as ce:
+                        print(f"Error fetching comments for {post['id']}: {ce}")
+
+                # Insert jika batch penuh agar RAM aman
+                if len(posts_batch) >= batch_size or len(comments_batch) >= batch_size * 5:
+                    _process_ig_to_neo4j_batch(posts_batch, comments_batch)
+                    posts_batch.clear()
+                    comments_batch.clear()
+
+            if stop_fetching: break
+            url = data.get('paging', {}).get('next')
+            params = {}
+
+        # Eksekusi sisa batch
+        if posts_batch or comments_batch:
+            _process_ig_to_neo4j_batch(posts_batch, comments_batch)
+            
+        print("✅ Sinkronisasi IG ke Neo4j Selesai.")
+
+    except Exception as e:
+        print(f"❌ Sinkronisasi Gagal: {e}")
+        traceback.print_exc()
+
+def get_instagram_metrics(start_date: str = None, end_date: str = None):
+    # Gunakan perf_counter untuk mengukur performa yang lebih akurat (pecahan detik)
+    start_time = time.perf_counter() 
     now = datetime.now(timezone.utc)
     
-    # 1. Tentukan Rentang Waktu
+    # 1. Parsing Tanggal
     if start_date:
         start_dt = parser.parse(start_date).replace(tzinfo=timezone.utc)
     else:
@@ -65,126 +238,91 @@ def get_instagram_metrics(start_date: str = None, end_date: str = None):
         last_day_of_month = calendar.monthrange(now.year, now.month)[1]
         end_dt = now.replace(day=last_day_of_month, hour=23, minute=59, second=59, microsecond=0)
 
-    all_posts = []
-    
+    str_start_iso = start_dt.strftime('%Y-%m-%dT%H:%M:%S+0000') 
+    str_end_iso = end_dt.strftime('%Y-%m-%dT%H:%M:%S+0000')
+
+    # 2. Query ke Neo4j (Dioptimalkan)
+    records = []
     try:
-        # 2. Tarik Semua Data Dari Instagram
-        while url:
-            # Safety break (15 detik) untuk mencegah server hang jika API error, 
-            if time.time() - start_time > 15.0:
-                break
-                
-            response = session.get(url, params=params, timeout=5)
-            data = response.json()
-            
-            if 'data' not in data or len(data['data']) == 0:
-                break
-
-            stop_pagination = False
-
-            # Lakukan Pengecekan per Postingan
-            for p in data['data']:
-                p_time_str = p.get('timestamp')
-                if not p_time_str: continue
-                    
-                p_time = parser.parse(p_time_str).replace(tzinfo=timezone.utc)
-
-                if p_time > end_dt:
-                    # Postingan terlalu baru, Skip.
-                    continue
-                elif p_time >= start_dt:
-                    # Postingan masuk dalam rentang waktu, MASUKKAN KE ARRAY
-                    all_posts.append(p)
-                else:
-                    # Karena API berurutan dari baru ke lama, 
-                    # Jika ketemu post yang lebih lama dari start_date, BERHENTI MENCARI.
-                    stop_pagination = True
-                    break
-
-            if stop_pagination:
-                break
-
-            # Lanjut ke halaman selanjutnya
-            if 'paging' in data and 'next' in data['paging']:
-                url = data['paging']['next']
-                params = {} # Kosongkan karena URL 'next' sudah membawa token
-            else:
-                break
-                
+        with neo4j_driver.session() as db_session:
+            query = """
+            MATCH (p:InstagramPost)
+            WHERE p.timestamp >= $start_iso AND p.timestamp <= $end_iso
+            RETURN p.id AS id, 
+                   p.permalink AS permalink, 
+                   coalesce(p.caption, '') AS caption, 
+                   coalesce(toInteger(p.like_count), 0) AS like_count, 
+                   coalesce(toInteger(p.comments_count), 0) AS comments_count, 
+                   p.timestamp AS timestamp
+            """
+            # Langsung ambil .data() secara efisien
+            records = db_session.run(query, start_iso=str_start_iso, end_iso=str_end_iso).data()
     except Exception as e:
-        return {"status": "error", "message": f"Gagal mengambil data live Instagram: {str(e)}"}
+        return {"status": "error", "message": f"Database Error: {str(e)}"}
 
-    str_start = start_dt.strftime('%Y-%m-%d')
-    str_end = end_dt.strftime('%Y-%m-%d')
-
-    if not all_posts:
+    if not records:
         return {
             "status": "success", 
-            "message": f"Tidak ada postingan yang ditemukan dari {str_start} hingga {str_end}.", 
+            "message": "Tidak ada postingan di rentang waktu tersebut.", 
             "data": {"top_10_posts": [], "top_10_hashtags": []}
         }
 
-    # =================================================================
-    # 3. KUMPULKAN DAN HITUNG HASHTAG DARI POSTINGAN YANG ADA
-    # =================================================================
+    # 3. Proses Analisis di RAM Python (Sangat Cepat - O(N))
     hashtag_counts = Counter()
     hashtag_to_posts = defaultdict(list)
 
-    for p in all_posts:
-        caption = p.get('caption', '')
+    for p in records:
+        caption = p['caption']
         if caption:
-            # Gunakan set() agar 1 hashtag dihitung 1x saja per postingan
-            tags = set(re.findall(r"#(\w+)", caption.lower()))
+            # Menggunakan regex yang sudah terkompilasi
+            tags = set(HASHTAG_REGEX.findall(caption.lower()))
             clean_cap = caption.replace('\n', ' ')
+            short_cap = clean_cap[:100] + "..." if len(clean_cap) > 100 else clean_cap
             
             post_info = {
-                "id": p.get("id"),
-                "permalink": p.get("permalink", ""),
-                "caption": clean_cap[:100] + "..." if len(clean_cap) > 100 else clean_cap,
-                "like_count": p.get("like_count", 0),
-                "comments_count": p.get("comments_count", 0),
-                "timestamp": p.get("timestamp", "")
+                "id": p["id"],
+                "permalink": p["permalink"],
+                "caption": short_cap,
+                "like_count": p["like_count"],
+                "comments_count": p["comments_count"],
+                "timestamp": p["timestamp"]
             }
             
             for tag in tags:
                 hashtag_counts[tag] += 1
                 hashtag_to_posts[tag].append(post_info)
 
-    # Ambil 10 Hashtag Teratas
+    # Susun Top 10 Hashtags
     top_10_hashtags = []
     for tag, count in hashtag_counts.most_common(10):
-        # Sort postingan di dalam hashtag tersebut berdasarkan like terbanyak
-        sorted_tag_posts = sorted(hashtag_to_posts[tag], key=lambda x: x["like_count"], reverse=True)
+        # Ambil Top 3 post dari list secara efisien
+        sorted_posts = sorted(hashtag_to_posts[tag], key=lambda x: x["like_count"], reverse=True)[:3]
         top_10_hashtags.append({
             "hashtag": f"#{tag}",
             "count": count,
-            "top_posts": sorted_tag_posts[:3] # Tampilkan 3 post terbaik di tiap hashtag
+            "top_posts": sorted_posts
         })
 
-    # =================================================================
-    # 4. SORTING UNTUK MENDAPATKAN TOP 10 POST (LIKE TERBANYAK)
-    # =================================================================
-    # Sort array all_posts secara descending (besar ke kecil) berdasarkan like_count
-    all_posts.sort(key=lambda x: x.get('like_count', 0), reverse=True)
-    
-    # Ambil 10 Teratas (Top 10)
+    # 4. Susun Top 10 Posts
+    records.sort(key=lambda x: x["like_count"], reverse=True)
     top_10_posts = []
-    for p in all_posts[:10]:
-        clean_cap = p.get("caption", "").replace('\n', ' ')
+    for p in records[:10]:
+        clean_cap = p['caption'].replace('\n', ' ')
         top_10_posts.append({
-            "id": p.get("id"),
-            "permalink": p.get("permalink", ""),
+            "id": p["id"],
+            "permalink": p["permalink"],
             "caption": clean_cap[:100] + "..." if len(clean_cap) > 100 else clean_cap,
-            "like_count": p.get("like_count", 0),
-            "comments_count": p.get("comments_count", 0),
-            "timestamp": p.get("timestamp", "")
+            "like_count": p["like_count"],
+            "comments_count": p["comments_count"],
+            "timestamp": p["timestamp"]
         })
 
-    process_time = round(time.time() - start_time, 2)
+    # Hitung total waktu proses dalam bentuk detik (sampai 4 angka di belakang koma)
+    process_time = round(time.perf_counter() - start_time, 4)
 
     return {
         "status": "success",
-        "message": f"Data live dari {str_start} s.d {str_end} ditarik ({len(all_posts)} post) dan disortir berdasarkan Like terbanyak dalam {process_time} detik.",
+        "message": f"Data {len(records)} postingan berhasil dianalisis dalam {process_time} detik.",
         "data": {
             "top_10_posts": top_10_posts,
             "top_10_hashtags": top_10_hashtags

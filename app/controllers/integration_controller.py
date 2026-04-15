@@ -25,9 +25,7 @@ def get_gspread_client():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal otentikasi Google Sheets: {str(e)}")
 
-# =====================================================================
-# 1. DATA EXTRACTOR & FORMATTER
-# =====================================================================
+
 def get_master_dataframe(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True) -> pd.DataFrame:
     """Mengambil SEMUA data, memformat tanggal, menambah link, memfilter rentang waktu, dan memfilter kolom (custom)"""
     dataset = []

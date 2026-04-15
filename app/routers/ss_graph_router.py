@@ -29,6 +29,6 @@ async def visualize_ss_graph_endpoint(
 ):
     """
     Endpoint Visualisasi HTML (Bisa dibuka langsung di Browser / WebView Flutter).
-    Contoh: http://127.0.0.1:8000/snagraph/visualize?mode=1&limit=500
+    Contoh: http://127.0.0.1:8000/snagraph/visualize?mode=2&limit=25000
     """
     return await neo4j_graph_controller.visualize_graph_from_neo4j(limit=limit, mode=mode)

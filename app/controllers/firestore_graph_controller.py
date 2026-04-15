@@ -118,6 +118,10 @@ async def create_graph_from_firestore(user_limit: int = 100, post_limit: int = 5
                 "edges": [{"source": u, "target": v, "attributes": G.edges[u, v]} for u, v in G.edges()]
             }
         }
+        
+    except HTTPException:
+        raise
+
     except Exception as e:
         import traceback
         traceback.print_exc()

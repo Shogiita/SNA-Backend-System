@@ -193,6 +193,7 @@ async def create_graph_from_neo4j(limit: int = 1000, mode: int = 1):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Gagal memproses graf Neo4j: {str(e)}")
+        
 async def visualize_graph_from_neo4j(limit: int = 1000, mode: int = 1):
     """ Endpoint Visualisasi HTML PyVis """
     try:
@@ -232,11 +233,15 @@ async def visualize_graph_from_neo4j(limit: int = 1000, mode: int = 1):
 
         net.toggle_physics(True)
         output_path = f"{OUTPUT_HTML_DIR}/snagraph_mode_{mode}.html"
-        net.save_graph(output_path)
+        # net.save_graph(output_path)
         
-        with open(output_path, "r", encoding="utf-8") as f:
-            html_content = f.read()
+        # with open(output_path, "r", encoding="utf-8") as f:
+        #     html_content = f.read()
             
+        html_content = net.generate_html(output_path)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+
         return HTMLResponse(content=html_content, status_code=200)
     except Exception as e:
         import traceback

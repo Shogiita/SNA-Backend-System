@@ -1,5 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from apscheduler.schedulers.background import BackgroundScheduler
+from app.controllers.sna_controller import sync_instagram_to_neo4j
+
 from app.routers import (
     csv_graph_router, 
     user_router, 
@@ -21,14 +24,7 @@ app = FastAPI(
     version="0.5.0", 
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  
-    allow_credentials=True,
-    allow_methods=["*"],  
-    allow_headers=["*"],  
-    expose_headers=["X-Process-Time"], 
-)
+scheduler = BackgroundScheduler()
 
 app.include_router(csv_graph_router.router)
 app.include_router(user_router.router)
@@ -46,3 +42,23 @@ app.include_router(integration_router.router)
 @app.get("/")
 def read_root():
     return {"message": "SNA Backend System is running with CORS Enabled for Flutter!"}
+
+@app.on_event("startup")
+def startup_event():
+    scheduler.add_job(sync_instagram_to_neo4j, 'interval', hours=1, args=[False])
+    scheduler.start()
+    print("🚀 APScheduler berjalan: Auto-update IG-Neo4j setiap 1 jam.")
+
+@app.on_event("shutdown")
+def shutdown_event():
+    scheduler.shutdown()
+    print("🛑 APScheduler dihentikan.")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],  
+    allow_headers=["*"],  
+    expose_headers=["X-Process-Time"], 
+)

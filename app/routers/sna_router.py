@@ -41,3 +41,19 @@ async def visualize_neo4j_endpoint(
     mode: int = Query(1, description="1 untuk 1-Mode (User-User), 2 untuk 2-Mode (User-Post)")
 ):
     return await sna_controller.visualize_neo4j_network(mode=mode)
+
+@router.post("/instagram/sync-neo4j")
+async def manual_sync_ig_neo4j_endpoint(
+    background_tasks: BackgroundTasks,
+    initial_sync: bool = Query(False, description="Set True jika ingin menarik data 1 Tahun. False untuk update data baru saja.")
+):
+    """
+    Endpoint manual untuk menarik data Instagram terbaru dan memasukannya ke Neo4j.
+    """
+    background_tasks.add_task(sna_controller.sync_instagram_to_neo4j, initial_sync)
+    
+    msg = "Proses penarikan 1 TAHUN data" if initial_sync else "Proses update data terbaru"
+    return {
+        "status": "success",
+        "message": f"{msg} Instagram ke Neo4j sedang berjalan di latar belakang."
+    }
