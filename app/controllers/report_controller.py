@@ -9,7 +9,7 @@ import random
 import time
 import calendar
 from dateutil import parser
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import networkx as nx
 from networkx.algorithms import bipartite
 from fastapi import HTTPException, Response
@@ -326,24 +326,18 @@ def get_stats_summary(source: str = "app"):
         iso_30_days_ago = (now - timedelta(days=30)).isoformat()
         epoch_30_days_ago = int((now - timedelta(days=30)).timestamp() * 1000)
 
-        if source == "instagram":
-            query = """
-            CALL { MATCH (u:User)-[:POSTED_IG|WROTE_IG]->() RETURN count(DISTINCT u) AS total_users }
-            CALL { MATCH (i:InstagramPost) RETURN count(i) AS total_infoss }
-            CALL { MATCH (c:InstagramComment) RETURN count(c) AS total_kawanss }
-            RETURN total_users, total_infoss, total_kawanss, 0 AS new_users_this_month, 0 AS new_users_last_month, 0 AS new_infoss_30_days, 0 AS new_kawanss_30_days
-            """
-        else:
-            query = """
-            CALL { MATCH (u:User) RETURN count(u) AS total_users }
-            CALL { MATCH (i:Infoss) RETURN count(i) AS total_infoss }
-            CALL { MATCH (k:KawanSS) RETURN count(k) AS total_kawanss }
-            CALL { MATCH (u:User) WHERE u.createdAt >= $iso_this_month OR u.joinDate >= $iso_this_month RETURN count(u) AS new_users_this_month }
-            CALL { MATCH (u:User) WHERE (u.createdAt >= $iso_last_month AND u.createdAt < $iso_this_month) OR (u.joinDate >= $iso_last_month AND u.joinDate < $iso_this_month) RETURN count(u) AS new_users_last_month }
-            CALL { MATCH (k:KawanSS) WHERE (k.isDeleted = false OR k.isDeleted IS NULL) AND k.createdAt >= $epoch_30_days_ago RETURN count(k) AS new_kawanss_30_days }
-            CALL { MATCH (i:Infoss) WHERE (i.isDeleted = false OR i.isDeleted IS NULL) AND (i.uploadDate >= $iso_30_days_ago OR i.createdAt >= $iso_30_days_ago) RETURN count(i) AS new_infoss_30_days }
-            RETURN total_users, total_infoss, total_kawanss, new_users_this_month, new_users_last_month, new_infoss_30_days, new_kawanss_30_days
-            """
+        # KITA HAPUS IF ELSE INSTAGRAM DI SINI.
+        # Query ini akan selalu dieksekusi agar 4 Kartu di Dashboard tidak pernah menjadi 0
+        query = """
+        CALL { MATCH (u:User) RETURN count(u) AS total_users }
+        CALL { MATCH (i:Infoss) RETURN count(i) AS total_infoss }
+        CALL { MATCH (k:KawanSS) RETURN count(k) AS total_kawanss }
+        CALL { MATCH (u:User) WHERE u.createdAt >= $iso_this_month OR u.joinDate >= $iso_this_month RETURN count(u) AS new_users_this_month }
+        CALL { MATCH (u:User) WHERE (u.createdAt >= $iso_last_month AND u.createdAt < $iso_this_month) OR (u.joinDate >= $iso_last_month AND u.joinDate < $iso_this_month) RETURN count(u) AS new_users_last_month }
+        CALL { MATCH (k:KawanSS) WHERE (k.isDeleted = false OR k.isDeleted IS NULL) AND k.createdAt >= $epoch_30_days_ago RETURN count(k) AS new_kawanss_30_days }
+        CALL { MATCH (i:Infoss) WHERE (i.isDeleted = false OR i.isDeleted IS NULL) AND (i.uploadDate >= $iso_30_days_ago OR i.createdAt >= $iso_30_days_ago) RETURN count(i) AS new_infoss_30_days }
+        RETURN total_users, total_infoss, total_kawanss, new_users_this_month, new_users_last_month, new_infoss_30_days, new_kawanss_30_days
+        """
 
         with neo4j_driver.session() as session:
             res = session.run(query, iso_this_month=iso_this_month, iso_last_month=iso_last_month, iso_30_days_ago=iso_30_days_ago, epoch_30_days_ago=epoch_30_days_ago).single()
@@ -353,15 +347,17 @@ def get_stats_summary(source: str = "app"):
         growth = (new_this_month / new_last_month) * 100 if new_last_month > 0 else (100.0 if new_this_month > 0 else 0.0)
 
         return {
-            "status": "success", "source_active": source,
+            "status": "success", 
+            "source_active": source,
             "data": {
                 "users": {"total": res["total_users"], "new_this_month": new_this_month, "new_last_month": new_last_month, "growth_percentage": round(growth, 2)},
                 "posts": {"total": res["total_infoss"], "new_30_days": res["new_infoss_30_days"], "total_kawn_ss": res["total_kawanss"], "new_30_days_kawanss": res["new_kawanss_30_days"]}
             }
         }
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return {"status": "error", "message": str(e)}
-
 
         
 def get_main_dashboard_summary(source: str = "app"):
