@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from app.controllers.sna_controller import sync_instagram_to_neo4j
+from app.controllers.report_controller import get_live_analytics_summary
 
 from app.routers import (
     csv_graph_router, 
@@ -47,7 +48,11 @@ def read_root():
 def startup_event():
     scheduler.add_job(sync_instagram_to_neo4j, 'interval', hours=1, args=[False])
     scheduler.start()
+
+    scheduler.add_job(get_live_analytics_summary, 'interval', minutes=2)
+
     print("🚀 APScheduler berjalan: Auto-update IG-Neo4j setiap 1 jam.")
+    print("🚀 APScheduler berjalan: Auto-hit GA4 Live Analytics setiap 2 menit.")
 
 @app.on_event("shutdown")
 def shutdown_event():

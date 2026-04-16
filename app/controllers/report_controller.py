@@ -319,7 +319,6 @@ def get_network_metrics_summary(source: str = "app"):
 
 def get_live_analytics_summary():
     try:
-        # Dummy fallback - Sesuaikan dengan fungsi GA4 riil Anda jika ada
         active_users_data = {"last_30_min": 0, "last_5_min": 0} 
         
         return {
