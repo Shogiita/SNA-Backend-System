@@ -22,7 +22,7 @@ def get_dashboard_top_content(
     end_date: str = Query(None, description="Format: YYYY-MM-DD (Kosongkan untuk bulan ini)")
 ):
     """Mengambil Top 10 Posts dan Top 10 Hashtags secara instan."""
-    return report_controller.get_top_content_summary(source)
+    return report_controller.get_top_content_summary(source=source, start_date=start_date, end_date=end_date)
 
 @router.get("/dashboard/network-metrics")
 def get_dashboard_network_metrics(

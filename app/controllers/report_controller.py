@@ -71,6 +71,9 @@ def get_realtime_active_users():
 # ==========================================
 # 2. API TOP CONTENT (Dengan Filter Tanggal)
 # ==========================================
+# ==========================================
+# 2. API TOP CONTENT (Dengan Filter Tanggal)
+# ==========================================
 def get_top_content_summary(source: str = "app", start_date: str = None, end_date: str = None):
     try:
         now = datetime.now()
@@ -111,11 +114,17 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
                    coalesce(toInteger(i.like_count), 0) AS jumlahLike 
             ORDER BY jumlahLike DESC LIMIT 10
             """
+            
+            # PERBAIKAN: Tarik metadata post untuk ditampilkan di UI (ID, Permalink, Likes, Comments)
             ht_query = """
             MATCH (p:InstagramPost) 
             WHERE p.caption IS NOT NULL AND p.caption CONTAINS '#'
               AND p.timestamp >= $start_iso AND p.timestamp <= $end_iso
-            RETURN p.caption AS text LIMIT 5000
+            RETURN p.id AS id, p.permalink AS permalink, p.caption AS text, 
+                   coalesce(toInteger(p.like_count), 0) AS likes, 
+                   coalesce(toInteger(p.comments_count), 0) AS comments, 
+                   p.timestamp AS timestamp
+            LIMIT 5000
             """
         else:
             top_query = """
@@ -129,17 +138,27 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
                    coalesce(toInteger(i.jumlahComment), 0) AS jumlahComment, coalesce(toInteger(i.jumlahLike), 0) AS jumlahLike 
             ORDER BY jumlahView DESC LIMIT 10
             """
+            
+            # PERBAIKAN: Tarik metadata post untuk data internal
             ht_query = """
             MATCH (p:KawanSS) 
             WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND p.deskripsi IS NOT NULL AND p.deskripsi CONTAINS '#'
               AND p.createdAt >= $epoch_start AND p.createdAt <= $epoch_end
-            RETURN p.deskripsi AS text LIMIT 5000
+            RETURN p.id AS id, '' AS permalink, p.deskripsi AS text, 
+                   coalesce(toInteger(p.jumlahLike), 0) AS likes, 
+                   coalesce(toInteger(p.jumlahComment), 0) AS comments, 
+                   toString(p.createdAt) AS timestamp
+            LIMIT 5000
             UNION ALL 
             MATCH (p:Infoss) 
             WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND coalesce(p.detail, p.judul, '') CONTAINS '#'
               AND (p.uploadDate >= $iso_start OR p.createdAt >= $iso_start)
               AND (p.uploadDate <= $iso_end OR p.createdAt <= $iso_end)
-            RETURN coalesce(p.detail, p.judul, '') AS text LIMIT 5000
+            RETURN p.id AS id, '' AS permalink, coalesce(p.detail, p.judul, '') AS text, 
+                   coalesce(toInteger(p.jumlahLike), 0) AS likes, 
+                   coalesce(toInteger(p.jumlahComment), 0) AS comments, 
+                   p.uploadDate AS timestamp
+            LIMIT 5000
             """
 
         with neo4j_driver.session() as session:
@@ -150,12 +169,49 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
                 top_content = session.run(top_query, iso_start=iso_start, iso_end=iso_end).data()
                 ht_records = session.run(ht_query, iso_start=iso_start, iso_end=iso_end, epoch_start=epoch_start, epoch_end=epoch_end).data()
 
-        # Proses Regex Hashtag
+        # 4. PERBAIKAN LOGIKA PEMROSESAN HASHTAG
         hashtag_pattern = re.compile(r'#\w+')
-        all_hashtags = []
+        hashtag_counts = Counter()
+        hashtag_posts_map = {}
+
         for r in ht_records:
-            if r.get('text'): all_hashtags.extend(hashtag_pattern.findall(r.get('text').lower()))
-        top_10_hashtags = [{"hashtag": tag, "count": count} for tag, count in Counter(all_hashtags).most_common(10)]
+            text = r.get('text', '')
+            if not text: continue
+            
+            # Gunakan set() agar 1 postingan tidak dihitung ganda jika memakai hashtag yang sama berulang kali
+            found_hashtags = set(hashtag_pattern.findall(text.lower()))
+            
+            # Bentuk representasi objek post
+            post_obj = {
+                "id": str(r.get("id", "")),
+                "permalink": str(r.get("permalink", "")),
+                "caption": str(text)[:150] + ("..." if len(str(text)) > 150 else ""),
+                "like_count": int(r.get("likes", 0)),
+                "comments_count": int(r.get("comments", 0)),
+                "total_engagement": int(r.get("likes", 0)) + int(r.get("comments", 0)),
+                "timestamp": str(r.get("timestamp", ""))
+            }
+            
+            for tag in found_hashtags:
+                hashtag_counts[tag] += 1
+                if tag not in hashtag_posts_map:
+                    hashtag_posts_map[tag] = []
+                hashtag_posts_map[tag].append(post_obj)
+
+        # Ambil 10 hashtag terbanyak
+        top_10 = hashtag_counts.most_common(10)
+        top_10_hashtags = []
+        
+        for tag, count in top_10:
+            # Urutkan list post pada hashtag tersebut berdasarkan total engagement terbesar
+            sorted_posts = sorted(hashtag_posts_map[tag], key=lambda x: x["total_engagement"], reverse=True)
+            
+            # Masukkan ke response list, ambil hanya Top 3
+            top_10_hashtags.append({
+                "hashtag": tag,
+                "count": count,
+                "top_posts": sorted_posts[:3]
+            })
 
         # Info indikator untuk frontend
         date_range_info = {
@@ -176,7 +232,7 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
         import traceback
         traceback.print_exc()
         return {"status": "error", "message": str(e)}
-
+        
 def get_network_metrics_summary(source: str = "app"):
     try:
         t_start = time.perf_counter()
