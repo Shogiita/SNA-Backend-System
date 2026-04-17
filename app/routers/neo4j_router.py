@@ -1,5 +1,4 @@
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, BackgroundTasks
 from app.controllers import neo4j_migration_controller
 
 router = APIRouter(
@@ -8,15 +7,17 @@ router = APIRouter(
 )
 
 @router.get("/migrate")
-async def start_migration_streaming():
+async def start_migration_background(background_tasks: BackgroundTasks):
     """
-    Endpoint SSE untuk Frontend.
-    Gunakan EventSource("http://url/neo4j/migrate") di JS/Flutter untuk membaca progress.
+    Menjalankan proses migrasi data dari Firebase ke Neo4j di latar belakang.
+    API akan langsung mengembalikan response sukses.
     """
-    return StreamingResponse(
-        neo4j_migration_controller.run_migration_streaming(),
-        media_type="text/event-stream"
-    )
+    background_tasks.add_task(neo4j_migration_controller.run_migration_background)
+    
+    return {
+        "status": "success",
+        "message": "Proses migrasi sedang berjalan di latar belakang. Silakan cek terminal server untuk melihat progres."
+    }
 
 @router.delete("/clear-all")
 async def clear_all_neo4j_data():

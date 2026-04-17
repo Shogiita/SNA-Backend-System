@@ -59,8 +59,8 @@ def _process_ig_to_neo4j_batch(posts_batch, comments_batch):
         p.view_count = post.view_count,   // Placeholder API limit
         p.timestamp = post.timestamp
     
-    // Asosiasi User Pembuat Post
-    MERGE (u:User {username: post.username})
+    // Asosiasi User Pembuat Post (Dipisah menggunakan label InstagramUser)
+    MERGE (u:InstagramUser {username: post.username})
     MERGE (u)-[:POSTED_IG]->(p)
     """
 
@@ -73,8 +73,8 @@ def _process_ig_to_neo4j_batch(posts_batch, comments_batch):
         c.type = comm.type,
         c.replies_count = comm.replies_count
         
-    // Asosiasi User Penulis Komen
-    MERGE (u:User {username: comm.username})
+    // Asosiasi User Penulis Komen (Dipisah menggunakan label InstagramUser)
+    MERGE (u:InstagramUser {username: comm.username})
     MERGE (u)-[:WROTE_IG]->(c)
     
     // Relasi ke Postingan atau ke Komentar Induk (Reply)
@@ -105,18 +105,20 @@ def _process_ig_to_neo4j_batch(posts_batch, comments_batch):
 def sync_instagram_to_neo4j(is_initial_sync=False):
     """
     Fungsi utama untuk menarik data dan memasukannya ke Neo4j.
-    Jika is_initial_sync = True, tarik data 1 tahun ke belakang.
-    Jika False, cukup tarik beberapa jam terakhir untuk efisiensi update.
     """
     print(f"🔄 Memulai Sinkronisasi IG ke Neo4j. Initial Sync: {is_initial_sync}")
     
     end_date = datetime.now(timezone.utc)
+    
+    # Batas pasti 2 bulan terakhir (Sliding window)
+    two_months_ago = end_date - relativedelta(months=2)
+    
     if is_initial_sync:
-        # Tarik data 1 Tahun ke belakang (Sesuai request sampai April 2025)
-        start_date = end_date - relativedelta(years=1) 
-        max_posts = 5000 # Angka aman untuk setahun
+        # Tarik data 2 Bulan ke belakang
+        start_date = two_months_ago 
+        max_posts = 5000 
     else:
-        # Untuk update harian/jam, cukup cek 2 hari ke belakang agar mengcover komen baru
+        # Untuk update harian/jam, cukup cek 2 hari ke belakang untuk menghemat limit API
         start_date = end_date - relativedelta(days=2)
         max_posts = 100
 
@@ -141,6 +143,8 @@ def sync_instagram_to_neo4j(is_initial_sync=False):
             stop_fetching = False
             for post in data['data']:
                 post_time = parser.isoparse(post['timestamp'])
+                
+                # Berhenti jika menemui postingan yang lebih lama dari start_date
                 if post_time < start_date:
                     stop_fetching = True
                     break
@@ -154,8 +158,8 @@ def sync_instagram_to_neo4j(is_initial_sync=False):
                     "media_type": post.get('media_type', 'UNKNOWN'),
                     "like_count": post.get('like_count', 0),
                     "comments_count": post.get('comments_count', 0),
-                    "share_count": 0, # Limitasi Graph API dasar
-                    "view_count": 0,  # Limitasi Graph API dasar
+                    "share_count": 0,
+                    "view_count": 0,
                     "timestamp": post.get('timestamp')
                 })
 
@@ -173,8 +177,6 @@ def sync_instagram_to_neo4j(is_initial_sync=False):
                         
                         for c in comm_data:
                             replies_data = c.get('replies', {}).get('data', [])
-                            
-                            # Komen Utama (Table/Node Komentar)
                             comments_batch.append({
                                 "id": c['id'],
                                 "target_id": post['id'],
@@ -186,11 +188,10 @@ def sync_instagram_to_neo4j(is_initial_sync=False):
                                 "timestamp": c.get('timestamp')
                             })
                             
-                            # Balasan Komen (Table/Node Komentar tapi tipe REPLY)
                             for r in replies_data:
                                 comments_batch.append({
                                     "id": r['id'],
-                                    "target_id": c['id'], # Relasikan ke Parent ID (Komentar utamanya)
+                                    "target_id": c['id'],
                                     "type": "REPLY",
                                     "text": r.get('text', ''),
                                     "username": r.get('username', 'Unknown'),
@@ -201,7 +202,6 @@ def sync_instagram_to_neo4j(is_initial_sync=False):
                     except Exception as ce:
                         print(f"Error fetching comments for {post['id']}: {ce}")
 
-                # Insert jika batch penuh agar RAM aman
                 if len(posts_batch) >= batch_size or len(comments_batch) >= batch_size * 5:
                     _process_ig_to_neo4j_batch(posts_batch, comments_batch)
                     posts_batch.clear()
@@ -211,14 +211,38 @@ def sync_instagram_to_neo4j(is_initial_sync=False):
             url = data.get('paging', {}).get('next')
             params = {}
 
-        # Eksekusi sisa batch
         if posts_batch or comments_batch:
             _process_ig_to_neo4j_batch(posts_batch, comments_batch)
             
-        print("✅ Sinkronisasi IG ke Neo4j Selesai.")
+        print("✅ Tarikan data IG ke Neo4j Selesai.")
+        cutoff_iso_string = two_months_ago.strftime('%Y-%m-%dT%H:%M:%S+0000')
+        print(f"🧹 Membersihkan data Instagram yang lebih lama dari {cutoff_iso_string}")
+        
+        cleanup_query = """
+        MATCH (c:InstagramComment) WHERE c.timestamp < $cutoff
+        DETACH DELETE c
+        """
+        cleanup_posts_query = """
+        MATCH (p:InstagramPost) WHERE p.timestamp < $cutoff
+        DETACH DELETE p
+        """
+        cleanup_users_query = """
+        MATCH (u:InstagramUser) WHERE NOT (u)--()
+        DELETE u
+        """
+        
+        try:
+            with neo4j_driver.session() as db_session:
+                db_session.run(cleanup_query, cutoff=cutoff_iso_string)
+                db_session.run(cleanup_posts_query, cutoff=cutoff_iso_string)
+                db_session.run(cleanup_users_query)
+            print("✅ Sinkronisasi dan Pembersihan Sliding Window Berhasil!")
+        except Exception as e:
+            print(f"[CLEANUP ERROR] Gagal membersihkan data lama: {e}")
 
     except Exception as e:
         print(f"❌ Sinkronisasi Gagal: {e}")
+        import traceback
         traceback.print_exc()
 
 def get_instagram_metrics(start_date: str = None, end_date: str = None):

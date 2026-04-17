@@ -9,11 +9,11 @@ router = APIRouter(
 #start
 
 @router.get("/dashboard/stats")
-def get_dashboard_stats(
-    source: str = Query("app", description="Pilih sumber data: 'app' (Suara Surabaya) atau 'instagram'")
-):
-    """Mengambil metrik angka total (User, Post) secara instan."""
-    return report_controller.get_stats_summary(source)
+def get_stats():
+    """
+    Mengambil summary user dan post bulanan (Mutlak dari data Firebase).
+    """
+    return report_controller.get_stats_summary()
 
 @router.get("/dashboard/top-content")
 def get_dashboard_top_content(

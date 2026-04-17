@@ -52,7 +52,7 @@ async def manual_sync_ig_neo4j_endpoint(
     """
     background_tasks.add_task(sna_controller.sync_instagram_to_neo4j, initial_sync)
     
-    msg = "Proses penarikan 1 TAHUN data" if initial_sync else "Proses update data terbaru"
+    msg = "Proses penarikan 2 Bulan data" if initial_sync else "Proses update data terbaru"
     return {
         "status": "success",
         "message": f"{msg} Instagram ke Neo4j sedang berjalan di latar belakang."

@@ -30,50 +30,29 @@ def get_realtime_active_users():
         credentials = service_account.Credentials.from_service_account_info(config.FIREBASE_CREDENTIALS)
         client = BetaAnalyticsDataClient(credentials=credentials)
 
-        # Request 1: 30 Menit Terakhir (Secara default GA4 Realtime mengambil 30 menit)
         request_30 = RunRealtimeReportRequest(
             property=f"properties/{property_id}",
             metrics=[Metric(name="activeUsers")]
         )
         
-        # Request 2: 5 Menit Terakhir (Kita spesifikasikan minute_ranges-nya)
         request_5 = RunRealtimeReportRequest(
             property=f"properties/{property_id}",
             metrics=[Metric(name="activeUsers")],
             minute_ranges=[MinuteRange(name="last_5", start_minutes_ago=4, end_minutes_ago=0)]
         )
         
-        # Eksekusi kedua request
         response_30 = client.run_realtime_report(request_30)
         response_5 = client.run_realtime_report(request_5)
         
-        # Parsing hasil Request 30 Menit
-        count_30 = 0
-        if response_30.rows:
-            count_30 = int(response_30.rows[0].metric_values[0].value)
+        count_30 = int(response_30.rows[0].metric_values[0].value) if response_30.rows else 0
+        count_5 = int(response_5.rows[0].metric_values[0].value) if response_5.rows else 0
             
-        # Parsing hasil Request 5 Menit
-        count_5 = 0
-        if response_5.rows:
-            count_5 = int(response_5.rows[0].metric_values[0].value)
-            
-        return {
-            "last_30_min": count_30,
-            "last_5_min": count_5
-        }
+        return {"last_30_min": count_30, "last_5_min": count_5}
         
     except Exception as e:
-        # Menambahkan print error ini agar jika GA4 menolak request, kita bisa lihat alasannya di terminal
         print(f"Error fetching Realtime GA4: {e}")
-        # Kita gunakan angka 200 lagi untuk ngetes apakah masih masuk ke error ini
         return {"last_30_min": 200, "last_5_min": 200}
 
-# ==========================================
-# 2. API TOP CONTENT (Dengan Filter Tanggal)
-# ==========================================
-# ==========================================
-# 2. API TOP CONTENT (Dengan Filter Tanggal)
-# ==========================================
 def get_top_content_summary(source: str = "app", start_date: str = None, end_date: str = None):
     try:
         now = datetime.now()
@@ -82,40 +61,39 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
         if start_date:
             start_dt = parser.parse(start_date).replace(hour=0, minute=0, second=0, microsecond=0)
         else:
-            # Default: Tanggal 1 bulan ini
             start_dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
         if end_date:
             end_dt = parser.parse(end_date).replace(hour=23, minute=59, second=59, microsecond=0)
         else:
-            # Default: Hari terakhir bulan ini
             last_day_of_month = calendar.monthrange(now.year, now.month)[1]
             end_dt = now.replace(day=last_day_of_month, hour=23, minute=59, second=59, microsecond=0)
 
         # 2. FORMATTING TANGGAL UNTUK DATABASE
-        # Format untuk Instagram (ISO dengan Timezone +0000)
         ig_iso_start = start_dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+0000')
         ig_iso_end = end_dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+0000')
         
-        # Format untuk App / Suara Surabaya (ISO Naive & Epoch)
         iso_start = start_dt.isoformat()
         iso_end = end_dt.isoformat()
         epoch_start = int(start_dt.timestamp() * 1000)
         epoch_end = int(end_dt.timestamp() * 1000)
 
-        # 3. QUERY CYPHER BERDASARKAN RENTANG WAKTU
+        # 3. QUERY CYPHER BERDASARKAN RENTANG WAKTU & SUMBER DATA
         if source == "instagram":
+            # [INSTAGRAM]: Menghilangkan jumlahView, mengganti gambar menjadi permalink
             top_query = """
             MATCH (i:InstagramPost) 
             WHERE i.timestamp >= $start_iso AND i.timestamp <= $end_iso
-            RETURN i.id AS id, coalesce(substring(i.caption, 0, 150), 'No Caption') AS judul, 
-                   0 AS jumlahView, 'Instagram' AS kategori, coalesce(i.permalink, '') AS gambar, 
-                   i.timestamp AS uploadDate, coalesce(toInteger(i.comments_count), 0) AS jumlahComment, 
+            RETURN i.id AS id, 
+                   coalesce(substring(i.caption, 0, 150), 'No Caption') AS judul, 
+                   coalesce(i.media_product_type, i.media_type, 'Instagram') AS kategori, 
+                   coalesce(i.permalink, '') AS permalink, 
+                   i.timestamp AS uploadDate, 
+                   coalesce(toInteger(i.comments_count), 0) AS jumlahComment, 
                    coalesce(toInteger(i.like_count), 0) AS jumlahLike 
-            ORDER BY jumlahLike DESC LIMIT 10
+            ORDER BY (jumlahLike + jumlahComment) DESC LIMIT 10
             """
             
-            # PERBAIKAN: Tarik metadata post untuk ditampilkan di UI (ID, Permalink, Likes, Comments)
             ht_query = """
             MATCH (p:InstagramPost) 
             WHERE p.caption IS NOT NULL AND p.caption CONTAINS '#'
@@ -127,21 +105,24 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
             LIMIT 5000
             """
         else:
+            # [APP]: Mempertahankan jumlahView, menggunakan gambar tanpa permalink
             top_query = """
-            MATCH (i:Infoss) 
+            MATCH (i:FirebaseInfoss) 
             WHERE (i.isDeleted = false OR i.isDeleted IS NULL)
               AND (i.uploadDate >= $iso_start OR i.createdAt >= $iso_start)
               AND (i.uploadDate <= $iso_end OR i.createdAt <= $iso_end)
             RETURN i.id AS id, coalesce(i.judul, i.title, 'No Title') AS judul, 
-                   coalesce(toInteger(i.jumlahView), 0) AS jumlahView, coalesce(i.kategori, 'Umum') AS kategori, 
-                   coalesce(i.gambar, '') AS gambar, i.uploadDate AS uploadDate, 
-                   coalesce(toInteger(i.jumlahComment), 0) AS jumlahComment, coalesce(toInteger(i.jumlahLike), 0) AS jumlahLike 
+                   coalesce(toInteger(i.jumlahView), 0) AS jumlahView, 
+                   coalesce(i.kategori, 'Umum') AS kategori, 
+                   coalesce(i.gambar, '') AS gambar, 
+                   coalesce(i.uploadDate, i.createdAt) AS uploadDate, 
+                   coalesce(toInteger(i.jumlahComment), 0) AS jumlahComment, 
+                   coalesce(toInteger(i.jumlahLike), 0) AS jumlahLike 
             ORDER BY jumlahView DESC LIMIT 10
             """
             
-            # PERBAIKAN: Tarik metadata post untuk data internal
             ht_query = """
-            MATCH (p:KawanSS) 
+            MATCH (p:FirebaseKawanSS) 
             WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND p.deskripsi IS NOT NULL AND p.deskripsi CONTAINS '#'
               AND p.createdAt >= $epoch_start AND p.createdAt <= $epoch_end
             RETURN p.id AS id, '' AS permalink, p.deskripsi AS text, 
@@ -150,17 +131,18 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
                    toString(p.createdAt) AS timestamp
             LIMIT 5000
             UNION ALL 
-            MATCH (p:Infoss) 
+            MATCH (p:FirebaseInfoss) 
             WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND coalesce(p.detail, p.judul, '') CONTAINS '#'
               AND (p.uploadDate >= $iso_start OR p.createdAt >= $iso_start)
               AND (p.uploadDate <= $iso_end OR p.createdAt <= $iso_end)
             RETURN p.id AS id, '' AS permalink, coalesce(p.detail, p.judul, '') AS text, 
                    coalesce(toInteger(p.jumlahLike), 0) AS likes, 
                    coalesce(toInteger(p.jumlahComment), 0) AS comments, 
-                   p.uploadDate AS timestamp
+                   coalesce(p.uploadDate, p.createdAt) AS timestamp
             LIMIT 5000
             """
 
+        # Eksekusi Query
         with neo4j_driver.session() as session:
             if source == "instagram":
                 top_content = session.run(top_query, start_iso=ig_iso_start, end_iso=ig_iso_end).data()
@@ -169,7 +151,7 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
                 top_content = session.run(top_query, iso_start=iso_start, iso_end=iso_end).data()
                 ht_records = session.run(ht_query, iso_start=iso_start, iso_end=iso_end, epoch_start=epoch_start, epoch_end=epoch_end).data()
 
-        # 4. PERBAIKAN LOGIKA PEMROSESAN HASHTAG
+        # 4. PEMROSESAN HASHTAG
         hashtag_pattern = re.compile(r'#\w+')
         hashtag_counts = Counter()
         hashtag_posts_map = {}
@@ -178,10 +160,8 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
             text = r.get('text', '')
             if not text: continue
             
-            # Gunakan set() agar 1 postingan tidak dihitung ganda jika memakai hashtag yang sama berulang kali
             found_hashtags = set(hashtag_pattern.findall(text.lower()))
             
-            # Bentuk representasi objek post
             post_obj = {
                 "id": str(r.get("id", "")),
                 "permalink": str(r.get("permalink", "")),
@@ -198,22 +178,17 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
                     hashtag_posts_map[tag] = []
                 hashtag_posts_map[tag].append(post_obj)
 
-        # Ambil 10 hashtag terbanyak
         top_10 = hashtag_counts.most_common(10)
         top_10_hashtags = []
         
         for tag, count in top_10:
-            # Urutkan list post pada hashtag tersebut berdasarkan total engagement terbesar
             sorted_posts = sorted(hashtag_posts_map[tag], key=lambda x: x["total_engagement"], reverse=True)
-            
-            # Masukkan ke response list, ambil hanya Top 3
             top_10_hashtags.append({
                 "hashtag": tag,
                 "count": count,
                 "top_posts": sorted_posts[:3]
             })
 
-        # Info indikator untuk frontend
         date_range_info = {
             "start": start_dt.strftime('%Y-%m-%d %H:%M:%S'),
             "end": end_dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -239,15 +214,15 @@ def get_network_metrics_summary(source: str = "app"):
         
         if source == "instagram":
             sna_query = """
-            MATCH (u:User)-[:POSTED_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
-            UNION ALL MATCH (u:User)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
-            UNION ALL MATCH (u:User)-[:WROTE_IG]->(reply:InstagramComment)-[:REPLIED_TO_IG]->(comment:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
+            MATCH (u:InstagramUser)-[:POSTED_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
+            UNION ALL MATCH (u:InstagramUser)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
+            UNION ALL MATCH (u:InstagramUser)-[:WROTE_IG]->(reply:InstagramComment)-[:REPLIED_TO_IG]->(comment:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
             """
         else:
             sna_query = """
-            MATCH (u:User)-[:POSTED]->(p:KawanSS) WHERE u.id <> 'unknown_user' RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
-            UNION ALL MATCH (u:User)-[:WROTE]->(c:KawanssComment)-[:COMMENTED_ON]->(p:KawanSS) WHERE u.id <> 'unknown_user' RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
-            UNION ALL MATCH (u:User)-[:WROTE]->(c:InfossComment)-[:COMMENTED_ON]->(p:Infoss) WHERE u.id <> 'unknown_user' RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
+            MATCH (u:FirebaseUser)-[:POSTED_FB]->(p:FirebaseKawanSS) WHERE u.id <> 'unknown_user' RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
+            UNION ALL MATCH (u:FirebaseUser)-[:WROTE_FB]->(c:FirebaseKawanSSComment)-[:COMMENTED_ON_FB]->(p:FirebaseKawanSS) WHERE u.id <> 'unknown_user' RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
+            UNION ALL MATCH (u:FirebaseUser)-[:WROTE_FB]->(c:FirebaseInfossComment)-[:COMMENTED_ON_FB]->(p:FirebaseInfoss) WHERE u.id <> 'unknown_user' RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
             """
 
         with neo4j_driver.session() as session:
@@ -320,7 +295,6 @@ def get_network_metrics_summary(source: str = "app"):
 def get_live_analytics_summary():
     try:
         active_users_data = {"last_30_min": 0, "last_5_min": 0} 
-        
         return {
             "status": "success",
             "data": {
@@ -338,18 +312,13 @@ def get_live_analytics_summary():
 
 def get_top_10_hashtags():
     query = """
-    MATCH (p:KawanSS)
-    WHERE (p.isDeleted = false OR p.isDeleted IS NULL)
-      AND p.deskripsi IS NOT NULL
-      AND p.deskripsi CONTAINS '#'
-    RETURN p.deskripsi AS text
-    LIMIT 5000
+    MATCH (p:FirebaseKawanSS)
+    WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND p.deskripsi IS NOT NULL AND p.deskripsi CONTAINS '#'
+    RETURN p.deskripsi AS text LIMIT 5000
     UNION ALL
-    MATCH (p:Infoss)
-    WHERE (p.isDeleted = false OR p.isDeleted IS NULL)
-      AND coalesce(p.detail, p.judul, '') CONTAINS '#'
-    RETURN coalesce(p.detail, p.judul, '') AS text
-    LIMIT 5000
+    MATCH (p:FirebaseInfoss)
+    WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND coalesce(p.detail, p.judul, '') CONTAINS '#'
+    RETURN coalesce(p.detail, p.judul, '') AS text LIMIT 5000
     """
     try:
         with neo4j_driver.session() as session:
@@ -367,13 +336,12 @@ def get_top_10_hashtags():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal mengambil top hashtags: {str(e)}")
 
-
 def get_first_day_of_last_month(dt):
     first_day_of_current_month = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     last_day_of_last_month = first_day_of_current_month - timedelta(days=1)
     return last_day_of_last_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-def get_stats_summary(source: str = "app"):
+def get_stats_summary():
     try:
         now = datetime.now()
         iso_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -381,21 +349,26 @@ def get_stats_summary(source: str = "app"):
         iso_30_days_ago = (now - timedelta(days=30)).isoformat()
         epoch_30_days_ago = int((now - timedelta(days=30)).timestamp() * 1000)
 
-        # KITA HAPUS IF ELSE INSTAGRAM DI SINI.
-        # Query ini akan selalu dieksekusi agar 4 Kartu di Dashboard tidak pernah menjadi 0
+        # Query mutlak hanya membaca data Firebase (Suara Surabaya Mobile)
         query = """
-        CALL { MATCH (u:User) RETURN count(u) AS total_users }
-        CALL { MATCH (i:Infoss) RETURN count(i) AS total_infoss }
-        CALL { MATCH (k:KawanSS) RETURN count(k) AS total_kawanss }
-        CALL { MATCH (u:User) WHERE u.createdAt >= $iso_this_month OR u.joinDate >= $iso_this_month RETURN count(u) AS new_users_this_month }
-        CALL { MATCH (u:User) WHERE (u.createdAt >= $iso_last_month AND u.createdAt < $iso_this_month) OR (u.joinDate >= $iso_last_month AND u.joinDate < $iso_this_month) RETURN count(u) AS new_users_last_month }
-        CALL { MATCH (k:KawanSS) WHERE (k.isDeleted = false OR k.isDeleted IS NULL) AND k.createdAt >= $epoch_30_days_ago RETURN count(k) AS new_kawanss_30_days }
-        CALL { MATCH (i:Infoss) WHERE (i.isDeleted = false OR i.isDeleted IS NULL) AND (i.uploadDate >= $iso_30_days_ago OR i.createdAt >= $iso_30_days_ago) RETURN count(i) AS new_infoss_30_days }
+        CALL { MATCH (u:FirebaseUser) RETURN count(u) AS total_users }
+        CALL { MATCH (i:FirebaseInfoss) RETURN count(i) AS total_infoss }
+        CALL { MATCH (k:FirebaseKawanSS) RETURN count(k) AS total_kawanss }
+        CALL { MATCH (u:FirebaseUser) WHERE u.createdAt >= $iso_this_month OR u.joinDate >= $iso_this_month RETURN count(u) AS new_users_this_month }
+        CALL { MATCH (u:FirebaseUser) WHERE (u.createdAt >= $iso_last_month AND u.createdAt < $iso_this_month) OR (u.joinDate >= $iso_last_month AND u.joinDate < $iso_this_month) RETURN count(u) AS new_users_last_month }
+        CALL { MATCH (k:FirebaseKawanSS) WHERE (k.isDeleted = false OR k.isDeleted IS NULL) AND k.createdAt >= $epoch_30_days_ago RETURN count(k) AS new_kawanss_30_days }
+        CALL { MATCH (i:FirebaseInfoss) WHERE (i.isDeleted = false OR i.isDeleted IS NULL) AND (i.uploadDate >= $iso_30_days_ago OR i.createdAt >= $iso_30_days_ago) RETURN count(i) AS new_infoss_30_days }
         RETURN total_users, total_infoss, total_kawanss, new_users_this_month, new_users_last_month, new_infoss_30_days, new_kawanss_30_days
         """
-
+        
         with neo4j_driver.session() as session:
-            res = session.run(query, iso_this_month=iso_this_month, iso_last_month=iso_last_month, iso_30_days_ago=iso_30_days_ago, epoch_30_days_ago=epoch_30_days_ago).single()
+            res = session.run(
+                query, 
+                iso_this_month=iso_this_month, 
+                iso_last_month=iso_last_month, 
+                iso_30_days_ago=iso_30_days_ago, 
+                epoch_30_days_ago=epoch_30_days_ago
+            ).single()
 
         new_this_month = res["new_users_this_month"]
         new_last_month = res["new_users_last_month"]
@@ -403,10 +376,19 @@ def get_stats_summary(source: str = "app"):
 
         return {
             "status": "success", 
-            "source_active": source,
             "data": {
-                "users": {"total": res["total_users"], "new_this_month": new_this_month, "new_last_month": new_last_month, "growth_percentage": round(growth, 2)},
-                "posts": {"total": res["total_infoss"], "new_30_days": res["new_infoss_30_days"], "total_kawn_ss": res["total_kawanss"], "new_30_days_kawanss": res["new_kawanss_30_days"]}
+                "users": {
+                    "total": res["total_users"], 
+                    "new_this_month": new_this_month, 
+                    "new_last_month": new_last_month, 
+                    "growth_percentage": round(growth, 2)
+                },
+                "posts": {
+                    "total": res["total_infoss"], 
+                    "new_30_days": res["new_infoss_30_days"], 
+                    "total_kawn_ss": res["total_kawanss"], 
+                    "new_30_days_kawanss": res["new_kawanss_30_days"]
+                }
             }
         }
     except Exception as e:
@@ -414,7 +396,6 @@ def get_stats_summary(source: str = "app"):
         traceback.print_exc()
         return {"status": "error", "message": str(e)}
 
-        
 def get_main_dashboard_summary(source: str = "app"):
     try:
         now = datetime.now()
@@ -432,7 +413,7 @@ def get_main_dashboard_summary(source: str = "app"):
 
         if source == "instagram":
             stats_query = """
-            CALL { MATCH (u:User)-[:POSTED_IG|WROTE_IG]->() RETURN count(DISTINCT u) AS total_users }
+            CALL { MATCH (u:InstagramUser)-[:POSTED_IG|WROTE_IG]->() RETURN count(DISTINCT u) AS total_users }
             CALL { MATCH (i:InstagramPost) RETURN count(i) AS total_infoss }
             CALL { MATCH (c:InstagramComment) RETURN count(c) AS total_kawanss }
             RETURN total_users, total_infoss, total_kawanss, 0 AS new_users_this_month, 0 AS new_users_last_month, 0 AS new_infoss_30_days, 0 AS new_kawanss_30_days
@@ -442,7 +423,7 @@ def get_main_dashboard_summary(source: str = "app"):
             MATCH (i:InstagramPost)
             RETURN i.id AS id, 
                    coalesce(substring(i.caption, 0, 150), 'No Caption') AS judul, 
-                   0 AS jumlahView, 
+                   coalesce(toInteger(i.view_count), 0) AS jumlahView, 
                    'Instagram' AS kategori, 
                    coalesce(i.permalink, '') AS gambar, 
                    i.timestamp AS uploadDate, 
@@ -452,13 +433,13 @@ def get_main_dashboard_summary(source: str = "app"):
             """
             
             sna_query = """
-            MATCH (u:User)-[:POSTED_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL
+            MATCH (u:InstagramUser)-[:POSTED_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL
             RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
             UNION ALL
-            MATCH (u:User)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL
+            MATCH (u:InstagramUser)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL
             RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
             UNION ALL
-            MATCH (u:User)-[:WROTE_IG]->(reply:InstagramComment)-[:REPLIED_TO_IG]->(comment:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL
+            MATCH (u:InstagramUser)-[:WROTE_IG]->(reply:InstagramComment)-[:REPLIED_TO_IG]->(comment:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost) WHERE u.username IS NOT NULL
             RETURN u.username AS uid, u.username AS uname, u.username AS username, p.id AS pid LIMIT 500
             """
 
@@ -470,40 +451,40 @@ def get_main_dashboard_summary(source: str = "app"):
             """
         else:
             stats_query = """
-            CALL { MATCH (u:User) RETURN count(u) AS total_users }
-            CALL { MATCH (i:Infoss) RETURN count(i) AS total_infoss }
-            CALL { MATCH (k:KawanSS) RETURN count(k) AS total_kawanss }
-            CALL { MATCH (u:User) WHERE u.createdAt >= $iso_this_month OR u.joinDate >= $iso_this_month RETURN count(u) AS new_users_this_month }
-            CALL { MATCH (u:User) WHERE (u.createdAt >= $iso_last_month AND u.createdAt < $iso_this_month) OR (u.joinDate >= $iso_last_month AND u.joinDate < $iso_this_month) RETURN count(u) AS new_users_last_month }
-            CALL { MATCH (k:KawanSS) WHERE (k.isDeleted = false OR k.isDeleted IS NULL) AND k.createdAt >= $epoch_30_days_ago RETURN count(k) AS new_kawanss_30_days }
-            CALL { MATCH (i:Infoss) WHERE (i.isDeleted = false OR i.isDeleted IS NULL) AND (i.uploadDate >= $iso_30_days_ago OR i.createdAt >= $iso_30_days_ago) RETURN count(i) AS new_infoss_30_days }
+            CALL { MATCH (u:FirebaseUser) RETURN count(u) AS total_users }
+            CALL { MATCH (i:FirebaseInfoss) RETURN count(i) AS total_infoss }
+            CALL { MATCH (k:FirebaseKawanSS) RETURN count(k) AS total_kawanss }
+            CALL { MATCH (u:FirebaseUser) WHERE u.createdAt >= $iso_this_month OR u.joinDate >= $iso_this_month RETURN count(u) AS new_users_this_month }
+            CALL { MATCH (u:FirebaseUser) WHERE (u.createdAt >= $iso_last_month AND u.createdAt < $iso_this_month) OR (u.joinDate >= $iso_last_month AND u.joinDate < $iso_this_month) RETURN count(u) AS new_users_last_month }
+            CALL { MATCH (k:FirebaseKawanSS) WHERE (k.isDeleted = false OR k.isDeleted IS NULL) AND k.createdAt >= $epoch_30_days_ago RETURN count(k) AS new_kawanss_30_days }
+            CALL { MATCH (i:FirebaseInfoss) WHERE (i.isDeleted = false OR i.isDeleted IS NULL) AND (i.uploadDate >= $iso_30_days_ago OR i.createdAt >= $iso_30_days_ago) RETURN count(i) AS new_infoss_30_days }
             RETURN total_users, total_infoss, total_kawanss, new_users_this_month, new_users_last_month, new_infoss_30_days, new_kawanss_30_days
             """
 
             top_content_query = """
-            MATCH (i:Infoss)
+            MATCH (i:FirebaseInfoss)
             WHERE i.isDeleted = false OR i.isDeleted IS NULL
             RETURN i.id AS id, coalesce(i.judul, i.title, 'No Title') AS judul, coalesce(toInteger(i.jumlahView), 0) AS jumlahView, coalesce(i.kategori, 'Umum') AS kategori, coalesce(i.gambar, '') AS gambar, i.uploadDate AS uploadDate, coalesce(toInteger(i.jumlahComment), 0) AS jumlahComment, coalesce(toInteger(i.jumlahLike), 0) AS jumlahLike
             ORDER BY jumlahView DESC LIMIT 10
             """
             
             sna_query = """
-            MATCH (u:User)-[:POSTED]->(p:KawanSS) WHERE u.id <> 'unknown_user'
+            MATCH (u:FirebaseUser)-[:POSTED_FB]->(p:FirebaseKawanSS) WHERE u.id <> 'unknown_user'
             RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
             UNION ALL
-            MATCH (u:User)-[:WROTE]->(c:KawanssComment)-[:COMMENTED_ON]->(p:KawanSS) WHERE u.id <> 'unknown_user'
+            MATCH (u:FirebaseUser)-[:WROTE_FB]->(c:FirebaseKawanSSComment)-[:COMMENTED_ON_FB]->(p:FirebaseKawanSS) WHERE u.id <> 'unknown_user'
             RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
             UNION ALL
-            MATCH (u:User)-[:WROTE]->(c:InfossComment)-[:COMMENTED_ON]->(p:Infoss) WHERE u.id <> 'unknown_user'
+            MATCH (u:FirebaseUser)-[:WROTE_FB]->(c:FirebaseInfossComment)-[:COMMENTED_ON_FB]->(p:FirebaseInfoss) WHERE u.id <> 'unknown_user'
             RETURN u.id AS uid, coalesce(u.nama, u.username, u.id) AS uname, coalesce(u.username, u.nama, u.id) AS username, p.id AS pid LIMIT 500
             """
 
             hashtag_query = """
-            MATCH (p:KawanSS)
+            MATCH (p:FirebaseKawanSS)
             WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND p.deskripsi IS NOT NULL AND p.deskripsi CONTAINS '#'
             RETURN p.deskripsi AS text LIMIT 5000
             UNION ALL
-            MATCH (p:Infoss)
+            MATCH (p:FirebaseInfoss)
             WHERE (p.isDeleted = false OR p.isDeleted IS NULL) AND coalesce(p.detail, p.judul, '') CONTAINS '#'
             RETURN coalesce(p.detail, p.judul, '') AS text LIMIT 5000
             """
@@ -756,7 +737,7 @@ def get_main_dashboard_summary(source: str = "app"):
         raise HTTPException(status_code=500, detail=str(e))
         
 async def export_neo4j_to_csv():
-    query = """MATCH (u:User) OPTIONAL MATCH (u)-[:POSTED]->(k:KawanSS) WHERE k.isDeleted = false OR k.isDeleted IS NULL RETURN u.id AS ID, coalesce(u.nama, u.username, 'Unknown') AS Nama, count(k) AS Total_Post ORDER BY Total_Post DESC"""
+    query = """MATCH (u:FirebaseUser) OPTIONAL MATCH (u)-[:POSTED_FB]->(k:FirebaseKawanSS) WHERE k.isDeleted = false OR k.isDeleted IS NULL RETURN u.id AS ID, coalesce(u.nama, u.username, 'Unknown') AS Nama, count(k) AS Total_Post ORDER BY Total_Post DESC"""
     try:
         with neo4j_driver.session() as session:
             records = session.run(query).data()
