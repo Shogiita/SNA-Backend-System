@@ -33,17 +33,130 @@ MAX_WORKERS = 10
 HASHTAG_REGEX = re.compile(r"#(\w+)")
 
 os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
-import time
-import requests
-import calendar
-import re
-from collections import Counter, defaultdict
-from dateutil import parser
-from datetime import datetime, timezone
-from app import config
 
 # Gunakan Session untuk mempercepat koneksi (Connection Pooling)
 session = requests.Session()
+
+def _build_neo4j_graph(mode: int, limit: int = 1000):
+    G = nx.DiGraph()
+
+    with neo4j_driver.session() as session:
+        if mode == 1:
+            query = """
+            CALL {
+                MATCH (u1:InstagramUser)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost)<-[:POSTED_IG]-(u2:InstagramUser)
+                WHERE u1.username <> u2.username
+                RETURN u1.username AS s_id, u2.username AS t_id, 3 AS w, 'COMMENT' AS t
+                UNION ALL
+                MATCH (u1:InstagramUser)-[:WROTE_IG]->(r:InstagramComment)-[:REPLIED_TO_IG]->(c:InstagramComment)<-[:WROTE_IG]-(u2:InstagramUser)
+                WHERE u1.username <> u2.username
+                RETURN u1.username AS s_id, u2.username AS t_id, 4 AS w, 'REPLY' AS t
+            }
+            WITH s_id, t_id, sum(w) AS total_weight, collect(DISTINCT t) AS rel_types
+            ORDER BY total_weight DESC
+            LIMIT $limit
+            RETURN s_id, t_id, total_weight AS weight, rel_types
+            """
+            records = session.run(query, limit=limit).data()
+            for r in records:
+                s_id, t_id = f"user_{r['s_id']}", f"user_{r['t_id']}"
+                if not G.has_node(s_id): G.add_node(s_id, type="user", label=r['s_id'])
+                if not G.has_node(t_id): G.add_node(t_id, type="user", label=r['t_id'])
+                
+                relation_str = ", ".join(r['rel_types'])
+                if G.has_edge(s_id, t_id):
+                    G[s_id][t_id]['weight'] += r['weight']
+                else:
+                    G.add_edge(s_id, t_id, relation=relation_str, weight=r['weight'])
+
+        elif mode == 2:
+            query_posts = """
+            MATCH (u:InstagramUser)-[:POSTED_IG]->(p:InstagramPost)
+            RETURN u.username AS uid, p.id AS pid, coalesce(p.caption, '') AS text, coalesce(p.like_count, 0) AS likes
+            LIMIT $limit
+            """
+            query_comments = """
+            MATCH (u:InstagramUser)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost)
+            RETURN u.username AS uid, c.id AS cid, coalesce(c.text, '') AS text, coalesce(c.likes, 0) AS likes, p.id AS target_id
+            LIMIT $limit
+            """
+            query_replies = """
+            MATCH (u:InstagramUser)-[:WROTE_IG]->(r:InstagramComment)-[:REPLIED_TO_IG]->(c:InstagramComment)
+            RETURN u.username AS uid, r.id AS cid, coalesce(r.text, '') AS text, coalesce(r.likes, 0) AS likes, c.id AS target_id
+            LIMIT $limit
+            """
+            
+            posts_data = session.run(query_posts, limit=limit).data()
+            comments_data = session.run(query_comments, limit=limit).data()
+            replies_data = session.run(query_replies, limit=limit).data()
+            
+            for r in posts_data:
+                u_id, p_id = f"user_{r['uid']}", f"post_{r['pid']}"
+                text = r['text']
+                if not G.has_node(u_id): G.add_node(u_id, type="user", label=r['uid'])
+                if not G.has_node(p_id): G.add_node(p_id, type="post_ig", label=text[:20]+"...", full_text=text, likes=r['likes'])
+                G.add_edge(u_id, p_id, relation="POSTED_IG", weight=5)
+                
+                hashtags = set(HASHTAG_REGEX.findall(text.lower()))
+                for tag in hashtags:
+                    h_id = f"tag_{tag}"
+                    if not G.has_node(h_id): G.add_node(h_id, type="hashtag", label=f"#{tag}")
+                    G.add_edge(p_id, h_id, relation="HAS_HASHTAG", weight=2)
+                    
+            for r in comments_data:
+                u_id, c_id, target_id = f"user_{r['uid']}", f"comment_{r['cid']}", f"post_{r['target_id']}"
+                text = r['text']
+                if not G.has_node(u_id): G.add_node(u_id, type="user", label=r['uid'])
+                if not G.has_node(c_id): G.add_node(c_id, type="comment_ig", label=text[:20]+"...", full_text=text, likes=r['likes'])
+                if G.has_node(target_id):
+                    G.add_edge(u_id, c_id, relation="WROTE_IG", weight=3)
+                    G.add_edge(c_id, target_id, relation="COMMENTED_ON_IG", weight=3)
+                    
+                    hashtags = set(HASHTAG_REGEX.findall(text.lower()))
+                    for tag in hashtags:
+                        h_id = f"tag_{tag}"
+                        if not G.has_node(h_id): G.add_node(h_id, type="hashtag", label=f"#{tag}")
+                        G.add_edge(c_id, h_id, relation="HAS_HASHTAG", weight=2)
+                        
+            for r in replies_data:
+                u_id, r_id, target_id = f"user_{r['uid']}", f"reply_{r['cid']}", f"comment_{r['target_id']}"
+                text = r['text']
+                if not G.has_node(u_id): G.add_node(u_id, type="user", label=r['uid'])
+                if not G.has_node(r_id): G.add_node(r_id, type="reply_ig", label=text[:20]+"...", full_text=text, likes=r['likes'])
+                if G.has_node(target_id):
+                    G.add_edge(u_id, r_id, relation="WROTE_IG", weight=4)
+                    G.add_edge(r_id, target_id, relation="REPLIED_TO_IG", weight=4)
+                    
+                    hashtags = set(HASHTAG_REGEX.findall(text.lower()))
+                    for tag in hashtags:
+                        h_id = f"tag_{tag}"
+                        if not G.has_node(h_id): G.add_node(h_id, type="hashtag", label=f"#{tag}")
+                        G.add_edge(r_id, h_id, relation="HAS_HASHTAG", weight=2)
+
+    G.remove_nodes_from(list(nx.isolates(G)))
+
+    if G.number_of_nodes() > 0:
+        mapping = {node: i for i, node in enumerate(G.nodes())}
+        reverse_mapping = {i: node for node, i in mapping.items()}
+        
+        ig_G = ig.Graph(directed=True)
+        ig_G.add_vertices(len(G.nodes()))
+        ig_G.add_edges([(mapping[u], mapping[v]) for u, v in G.edges()])
+        
+        if nx.is_weighted(G):
+            ig_G.es['weight'] = [G[u][v]['weight'] for u, v in G.edges()]
+
+        partition = la.find_partition(
+            ig_G, la.ModularityVertexPartition,
+            weights=ig_G.es['weight'] if 'weight' in ig_G.es.attributes() else None,
+            n_iterations=-1
+        )
+
+        for comm_id, members in enumerate(partition):
+            for idx in members:
+                G.nodes[reverse_mapping[idx]]['community'] = comm_id
+
+    return G
 
 def _process_ig_to_neo4j_batch(posts_batch, comments_batch):
     """Fungsi helper untuk memasukkan data ke Neo4j secara batching"""
@@ -645,85 +758,111 @@ def get_dataset_flat():
         headers={"Content-Disposition": f"attachment; filename={new_filename}"}
     )
 
-def _build_neo4j_graph(mode: int):
-    """
-    Helper untuk membangun NetworkX DiGraph langsung dari Neo4j dengan Cypher.
-    """
+def _build_neo4j_graph(mode: int, limit: int = 1000):
     G = nx.DiGraph()
 
-    if mode == 1:
-        # --- MODE 1: USER TO USER (1-MODE GRAPH) ---
-        # Definisi: User A berinteraksi dengan User B jika A me-like/komen postingan B.
-        query = """
-        // 1. Relasi LIKES (Bobot 1)
-        MATCH (u1:User)-[:LIKES_KAWAN]->(p:KawanSS)<-[:POSTED]-(u2:User)
-        WHERE u1.id <> u2.id
-        RETURN u1.id AS source_id, coalesce(u1.nama, u1.username, 'Unknown') AS source_name,
-               u2.id AS target_id, coalesce(u2.nama, u2.username, 'Unknown') AS target_name,
-               'LIKE' AS type, 1 AS weight
-        UNION ALL
-        // 2. Relasi COMMENTS (Bobot 3)
-        MATCH (u1:User)-[:WROTE]->(c:KawanssComment)-[:COMMENTED_ON]->(p:KawanSS)<-[:POSTED]-(u2:User)
-        WHERE u1.id <> u2.id
-        RETURN u1.id AS source_id, coalesce(u1.nama, u1.username, 'Unknown') AS source_name,
-               u2.id AS target_id, coalesce(u2.nama, u2.username, 'Unknown') AS target_name,
-               'COMMENT' AS type, 3 AS weight
-        """
-        
-        with neo4j_driver.session() as session:
-            records = session.run(query).data()
-            
-        for r in records:
-            s_id, t_id = r['source_id'], r['target_id']
-            if not G.has_node(s_id): G.add_node(s_id, label=r['source_name'], type="user")
-            if not G.has_node(t_id): G.add_node(t_id, label=r['target_name'], type="user")
-            
-            if G.has_edge(s_id, t_id):
-                G[s_id][t_id]['weight'] += r['weight']
-            else:
-                G.add_edge(s_id, t_id, weight=r['weight'], type=r['type'])
+    with neo4j_driver.session() as session:
+        if mode == 1:
+            # Mode 1: User to User (Mendukung InstagramPosts & InstagramPost)
+            query = """
+            CALL {
+                MATCH (u1:InstagramUser)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p)<-[:POSTED_IG]-(u2:InstagramUser)
+                WHERE (p:InstagramPosts OR p:InstagramPost) AND u1.username <> u2.username
+                RETURN u1.username AS s_id, u2.username AS t_id, 3 AS w, 'COMMENT' AS t
+                UNION ALL
+                MATCH (u1:InstagramUser)-[:WROTE_IG]->(r:InstagramComment)-[:REPLIED_TO_IG]->(c:InstagramComment)<-[:WROTE_IG]-(u2:InstagramUser)
+                WHERE u1.username <> u2.username
+                RETURN u1.username AS s_id, u2.username AS t_id, 4 AS w, 'REPLY' AS t
+            }
+            WITH s_id, t_id, sum(w) AS total_weight, collect(DISTINCT t) AS rel_types
+            ORDER BY total_weight DESC
+            LIMIT $limit
+            RETURN s_id, t_id, total_weight AS weight, rel_types
+            """
+            records = session.run(query, limit=limit).data()
+            for r in records:
+                s_id, t_id = f"user_{r['s_id']}", f"user_{r['t_id']}"
+                if not G.has_node(s_id): G.add_node(s_id, type="user", label=r['s_id'])
+                if not G.has_node(t_id): G.add_node(t_id, type="user", label=r['t_id'])
+                
+                relation_str = ", ".join(r['rel_types'])
+                if G.has_edge(s_id, t_id):
+                    G[s_id][t_id]['weight'] += r['weight']
+                else:
+                    G.add_edge(s_id, t_id, relation=relation_str, weight=r['weight'])
 
-    elif mode == 2:
-        # --- MODE 2: USER TO POST (2-MODE / BIPARTITE GRAPH) ---
-        query = """
-        // 1. Relasi KEPEMILIKAN POST (Bobot 5)
-        MATCH (u:User)-[:POSTED]->(p:KawanSS)
-        RETURN u.id AS source_id, coalesce(u.nama, u.username, 'Unknown') AS source_name, 'user' AS source_type,
-               p.id AS target_id, coalesce(p.title, 'Postingan') AS target_name, 'post' AS target_type,
-               'AUTHORED' AS type, 5 AS weight
-        UNION ALL
-        // 2. Relasi LIKES_KAWAN (Bobot 1)
-        MATCH (u:User)-[:LIKES_KAWAN]->(p:KawanSS)
-        RETURN u.id AS source_id, coalesce(u.nama, u.username, 'Unknown') AS source_name, 'user' AS source_type,
-               p.id AS target_id, coalesce(p.title, 'Postingan') AS target_name, 'post' AS target_type,
-               'LIKE' AS type, 1 AS weight
-        UNION ALL
-        // 3. Relasi COMMENTED_ON (Bobot 3)
-        MATCH (u:User)-[:WROTE]->(c:KawanssComment)-[:COMMENTED_ON]->(p:KawanSS)
-        RETURN u.id AS source_id, coalesce(u.nama, u.username, 'Unknown') AS source_name, 'user' AS source_type,
-               p.id AS target_id, coalesce(p.title, 'Postingan') AS target_name, 'post' AS target_type,
-               'COMMENT' AS type, 3 AS weight
-        """
-        
-        with neo4j_driver.session() as session:
-            records = session.run(query).data()
+        elif mode == 2:
+            # Mode 2: Multi-modal (Mendukung InstagramPosts & Hashtag dari Comment)
+            query_posts = """
+            MATCH (u:InstagramUser)-[:POSTED_IG]->(p)
+            WHERE p:InstagramPosts OR p:InstagramPost
+            RETURN u.username AS uid, p.id AS pid, coalesce(p.caption, '') AS text, coalesce(p.like_count, 0) AS likes
+            LIMIT $limit
+            """
+            query_comments = """
+            MATCH (u:InstagramUser)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p)
+            WHERE p:InstagramPosts OR p:InstagramPost
+            RETURN u.username AS uid, c.id AS cid, coalesce(c.text, '') AS text, coalesce(c.likes, 0) AS likes, p.id AS target_id
+            LIMIT $limit
+            """
+            query_replies = """
+            MATCH (u:InstagramUser)-[:WROTE_IG]->(r:InstagramComment)-[:REPLIED_TO_IG]->(c:InstagramComment)
+            RETURN u.username AS uid, r.id AS cid, coalesce(r.text, '') AS text, coalesce(r.likes, 0) AS likes, c.id AS target_id
+            LIMIT $limit
+            """
             
-        for r in records:
-            s_id = f"user_{r['source_id']}"
-            t_id = f"post_{r['target_id']}"
+            posts_data = session.run(query_posts, limit=limit).data()
+            comments_data = session.run(query_comments, limit=limit).data()
+            replies_data = session.run(query_replies, limit=limit).data()
             
-            if not G.has_node(s_id): G.add_node(s_id, label=r['source_name'], type="user")
-            if not G.has_node(t_id): G.add_node(t_id, label=r['target_name'], type="post")
-            
-            if G.has_edge(s_id, t_id):
-                G[s_id][t_id]['weight'] += r['weight']
-            else:
-                G.add_edge(s_id, t_id, weight=r['weight'], type=r['type'])
+            # --- 1. Proses Posting ---
+            for r in posts_data:
+                u_id, p_id = f"user_{r['uid']}", f"post_{r['pid']}"
+                text = r['text']
+                if not G.has_node(u_id): G.add_node(u_id, type="user", label=r['uid'])
+                if not G.has_node(p_id): G.add_node(p_id, type="post_ig", label=text[:20]+"...", full_text=text, likes=r['likes'])
+                G.add_edge(u_id, p_id, relation="POSTED_IG", weight=5)
+                    
+            # --- 2. Proses Comment & Ekstrak Hashtag dari Comment ---
+            for r in comments_data:
+                u_id, c_id, target_id = f"user_{r['uid']}", f"comment_{r['cid']}", f"post_{r['target_id']}"
+                text = r['text']
+                if not G.has_node(u_id): G.add_node(u_id, type="user", label=r['uid'])
+                if not G.has_node(c_id): G.add_node(c_id, type="comment_ig", label=text[:20]+"...", full_text=text, likes=r['likes'])
+                
+                if G.has_node(target_id):
+                    G.add_edge(u_id, c_id, relation="WROTE_IG", weight=3)
+                    G.add_edge(c_id, target_id, relation="COMMENTED_ON_IG", weight=3)
+                    
+                # Ekstrak HASHTAG khusus dari text InstagramComment
+                hashtags = set(HASHTAG_REGEX.findall(text.lower()))
+                for tag in hashtags:
+                    h_id = f"tag_{tag}"
+                    if not G.has_node(h_id): G.add_node(h_id, type="hashtag", label=f"#{tag}")
+                    G.add_edge(c_id, h_id, relation="COMMENT_HASHTAG", weight=2)
+                        
+            # --- 3. Proses Reply & Ekstrak Hashtag dari Reply ---
+            for r in replies_data:
+                u_id, r_id, target_id = f"user_{r['uid']}", f"reply_{r['cid']}", f"comment_{r['target_id']}"
+                text = r['text']
+                if not G.has_node(u_id): G.add_node(u_id, type="user", label=r['uid'])
+                if not G.has_node(r_id): G.add_node(r_id, type="reply_ig", label=text[:20]+"...", full_text=text, likes=r['likes'])
+                
+                if G.has_node(target_id):
+                    G.add_edge(u_id, r_id, relation="WROTE_IG", weight=4)
+                    G.add_edge(r_id, target_id, relation="REPLIED_TO_IG", weight=4)
+                    
+                # Ekstrak HASHTAG khusus dari text InstagramComment (tipe Reply)
+                hashtags = set(HASHTAG_REGEX.findall(text.lower()))
+                for tag in hashtags:
+                    h_id = f"tag_{tag}"
+                    if not G.has_node(h_id): G.add_node(h_id, type="hashtag", label=f"#{tag}")
+                    G.add_edge(r_id, h_id, relation="REPLY_HASHTAG", weight=2)
 
-    # Hapus node yang terisolasi
+    # Menghapus node yang terisolasi
     G.remove_nodes_from(list(nx.isolates(G)))
 
-    # --- CLUSTERING (LEIDEN ALGORITHM) ---
+    # Algoritma Clustering (Leiden)
     if G.number_of_nodes() > 0:
         mapping = {node: i for i, node in enumerate(G.nodes())}
         reverse_mapping = {i: node for node, i in mapping.items()}
@@ -732,79 +871,79 @@ def _build_neo4j_graph(mode: int):
         ig_G.add_vertices(len(G.nodes()))
         ig_G.add_edges([(mapping[u], mapping[v]) for u, v in G.edges()])
         
-        # Menerapkan weights ke iGraph untuk deteksi komunitas yang akurat
         if nx.is_weighted(G):
             ig_G.es['weight'] = [G[u][v]['weight'] for u, v in G.edges()]
 
-        # Find Partitions
         partition = la.find_partition(
-            ig_G, 
-            la.ModularityVertexPartition,
+            ig_G, la.ModularityVertexPartition,
             weights=ig_G.es['weight'] if 'weight' in ig_G.es.attributes() else None,
             n_iterations=-1
         )
 
-        # Mapping warna cluster ke node
         for comm_id, members in enumerate(partition):
             for idx in members:
-                node_id = reverse_mapping[idx]
-                G.nodes[node_id]['community'] = comm_id
+                G.nodes[reverse_mapping[idx]]['community'] = comm_id
 
     return G
 
-
-async def visualize_neo4j_network(mode: int = 1):
-    """
-    Menghasilkan HTML interaktif visualisasi graf berdasarkan data Neo4j.
-    """
+async def visualize_neo4j_network(mode: int = 1, limit: int = 1000):
     try:
-        G = _build_neo4j_graph(mode)
+        from pyvis.network import Network
+        # Parameter limit sudah ditambahkan dengan benar
+        G = _build_neo4j_graph(mode, limit)
         
         if G.number_of_nodes() == 0:
             return HTMLResponse("<h1>Graf Kosong</h1><p>Belum ada data relasi di Neo4j. Lakukan migrasi terlebih dahulu.</p>")
 
         degree_cent = nx.degree_centrality(G)
-        
         net = Network(height="100vh", width="100%", bgcolor="#1e1e1e", font_color="white", cdn_resources='in_line')
         
-        # --- MENAMBAHKAN NODE ---
         for node, data in G.nodes(data=True):
-            group = data.get('community', 0) # Warna dinamis dari Leiden
+            group = data.get('community', 0)
             score = degree_cent.get(node, 0)
-            size = 15 + (score * 60) # Ukuran lingkaran menyesuaikan Degree Centrality
+            size = 15 + (score * 60)
             
-            # Bentuk berbeda untuk 2-Mode
+            node_type = data.get('type', 'user')
             shape = 'dot'
-            if mode == 2 and data.get('type') == 'post':
+            color = None
+            
+            if node_type == 'user':
+                shape = 'dot'
+            elif node_type == 'post_ig':
                 shape = 'square'
+                color = "#E1306C" # Pink/Ungu IG
+            elif node_type == 'comment_ig':
+                shape = 'triangle'
+                color = "#F56040" # Orange 
+            elif node_type == 'reply_ig':
+                shape = 'triangleDown'
+                color = "#FCAF45" # Kuning/Orange
+            elif node_type == 'hashtag':
+                shape = 'star'
+                color = "#833AB4" # Ungu hashtag
                 
-            title_html = f"<b>{data.get('type').upper()}:</b> {data.get('label')}<br><b>Cluster/Komunitas:</b> {group}"
+            label = data.get('label', str(node))
+            title_html = f"<b>{str(node_type).upper()}:</b> {label}<br><b>Cluster/Komunitas:</b> {group}"
+            if 'likes' in data:
+                title_html += f"<br><b>Total Likes:</b> {data['likes']}"
             
-            net.add_node(
-                node, 
-                label=data.get('label', str(node))[:15], 
-                title=title_html,
-                group=group, 
-                size=size,
-                shape=shape
-            )
+            if color:
+                net.add_node(node, label=str(label)[:15], title=title_html, group=group, size=size, shape=shape, color=color)
+            else:
+                net.add_node(node, label=str(label)[:15], title=title_html, group=group, size=size, shape=shape)
             
-        # --- MENAMBAHKAN WEIGHTED EDGES ---
         for u, v, data in G.edges(data=True):
             weight = data.get('weight', 1)
-            edge_type = data.get('type', 'Interaction')
-            
-            # Value akan membuat garis di HTML lebih tebal sesuai bobotnya
+            edge_type = data.get('relation', 'Interaction')
             net.add_edge(u, v, value=weight, title=f"Tipe: {edge_type}<br>Total Bobot: {weight}")
 
         net.toggle_physics(True)
-        
         output_path = f"{OUTPUT_HTML_DIR}/neo4j_mode_{mode}.html"
-        net.save_graph(output_path)
         
-        with open(output_path, "r", encoding="utf-8") as f:
-            html_content = f.read()
-            
+        html_content = net.generate_html(output_path)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+
         return HTMLResponse(content=html_content, status_code=200)
 
     except Exception as e:
@@ -812,7 +951,29 @@ async def visualize_neo4j_network(mode: int = 1):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Gagal memvisualisasikan graf Neo4j: {str(e)}")
 
-async def analyze_neo4j_network(mode: int = 1):
+async def analyze_neo4j_network(mode: int = 1, limit: int = 1000):
+    try:
+        G = _build_neo4j_graph(mode, limit)
+        nodes_result = [{"id": n, "attributes": G.nodes[n]} for n in G.nodes()]
+        edges_result = [{"source": u, "target": v, "attributes": G[u][v]} for u, v in G.edges()]
+        
+        return {
+            "meta": {"mode": mode, "total_nodes": G.number_of_nodes(), "total_edges": G.number_of_edges()},
+            "graph_data": {"nodes": nodes_result, "edges": edges_result}
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    try:
+        G = _build_neo4j_graph(mode, limit)
+        nodes_result = [{"id": n, "attributes": G.nodes[n]} for n in G.nodes()]
+        edges_result = [{"source": u, "target": v, "attributes": G[u][v]} for u, v in G.edges()]
+        
+        return {
+            "meta": {"mode": mode, "total_nodes": G.number_of_nodes(), "total_edges": G.number_of_edges()},
+            "graph_data": {"nodes": nodes_result, "edges": edges_result}
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     """
     Mengembalikan JSON murni jika Flutter Anda membutuhkan raw data Nodes & Edges beserta Komunitasnya.
     """

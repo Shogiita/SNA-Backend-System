@@ -32,15 +32,17 @@ def get_sna_dataset_endpoint():
 
 @router.get("/neo4j/analyze")
 async def analyze_neo4j_endpoint(
-    mode: int = Query(1, description="1 untuk 1-Mode (User-User), 2 untuk 2-Mode (User-Post)")
+    mode: int = Query(1, description="1 untuk 1-Mode (User-User), 2 untuk 2-Mode (User-Post)"),
+    limit: int = Query(1000, description="Limit nodes agar browser tidak freeze")
 ):
-    return await sna_controller.analyze_neo4j_network(mode=mode)
+    return await sna_controller.analyze_neo4j_network(mode=mode, limit=limit)
 
 @router.get("/neo4j/visualize")
 async def visualize_neo4j_endpoint(
-    mode: int = Query(1, description="1 untuk 1-Mode (User-User), 2 untuk 2-Mode (User-Post)")
+    mode: int = Query(1, description="1 untuk 1-Mode (User-User), 2 untuk 2-Mode (User-Post)"),
+    limit: int = Query(1000, description="Limit nodes agar browser tidak freeze")
 ):
-    return await sna_controller.visualize_neo4j_network(mode=mode)
+    return await sna_controller.visualize_neo4j_network(mode=mode, limit=limit)
 
 @router.post("/instagram/sync-neo4j")
 async def manual_sync_ig_neo4j_endpoint(

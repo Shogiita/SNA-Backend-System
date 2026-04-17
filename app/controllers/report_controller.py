@@ -207,7 +207,7 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
         import traceback
         traceback.print_exc()
         return {"status": "error", "message": str(e)}
-        
+
 def get_network_metrics_summary(source: str = "app"):
     try:
         t_start = time.perf_counter()
@@ -241,25 +241,66 @@ def get_network_metrics_summary(source: str = "app"):
             u_node, p_node = f"user_{uid}", f"post_{r['pid']}"
             G.add_node(u_node, type="user", name=str(r['uname']), username=str(r['username']), bipartite=0)
             G.add_node(p_node, type="post", bipartite=1)       
-            if G.has_edge(u_node, p_node): G[u_node][p_node]['weight'] += 1
-            else: G.add_edge(u_node, p_node, weight=1)
+            if G.has_edge(u_node, p_node): 
+                G[u_node][p_node]['weight'] += 1
+            else: 
+                G.add_edge(u_node, p_node, weight=1)
 
         user_nodes = [n for n, d in G.nodes(data=True) if d.get('type') == 'user']
         
         if user_nodes:
+            # 1. Kalkulasi Global Metrics dari 1-Mode Projection
             G_user = bipartite.projected_graph(G, user_nodes)
             components = sorted(nx.connected_components(G_user), key=len, reverse=True)
             
+            total_avg_deg, total_max_reach, total_reach_count = 0.0, 0, 0
+            for comp in components:
+                G_sub = G_user.subgraph(comp)
+                lengths = dict(nx.all_pairs_shortest_path_length(G_sub))
+                for u in comp:
+                    reachable = [dist for target, dist in lengths[u].items() if dist > 0]
+                    if reachable:
+                        total_avg_deg += sum(reachable) / len(reachable)
+                        total_max_reach += max(reachable)
+                        total_reach_count += len(reachable)
+            
+            if len(user_nodes) > 0:
+                global_metrics = {
+                    "average_of_average_degrees": round(total_avg_deg / len(user_nodes), 2),
+                    "average_of_network_diameters": round(total_max_reach / len(user_nodes), 2),
+                    "average_of_connected_users": round(total_reach_count / len(user_nodes), 2)
+                }
+
+            # 2. Kalkulasi Cliques
             all_cliques = []
             if len(G_user.nodes()) < 500: 
                 all_cliques = [c for c in nx.find_cliques(G_user) if len(c) >= 3]
             
+            if all_cliques:
+                all_cliques.sort(key=len, reverse=True)
+                clique_metrics["global_metrics"] = {"total_cliques": len(all_cliques), "largest_clique_size": len(all_cliques[0])}
+                clique_metrics["top_10_cliques"] = [{"rank": i+1, "size": len(c), "members": [{"username": G.nodes[u].get('username')} for u in c]} for i, c in enumerate(all_cliques[:10])]
+
+            # 3. Persiapan Weight & Distance untuk Centrality
+            for u, v, d in G.edges(data=True):
+                d['distance'] = 1.0 / d['weight'] if d.get('weight', 0) > 0 else 1.0
+
+            # 4. Kalkulasi 4 Metrik Centrality
             deg_cent = nx.degree_centrality(G)
             bet_cent = nx.betweenness_centrality(G, k=min(20, len(G.nodes())), weight='weight')
+            clo_cent = nx.closeness_centrality(G, distance='distance')
+            
+            try:
+                eig_cent = nx.eigenvector_centrality(G, weight='weight', max_iter=1000, tol=1e-03)
+            except Exception:
+                eig_cent = {n: 0.0 for n in G.nodes()}
             
             top_10_centrality["degree"] = [{"id": n.replace('user_',''), "username": G.nodes[n].get('username', ''), "metrics": {"degree": round(v,4)}} for n, v in sorted(deg_cent.items(), key=lambda x: x[1], reverse=True) if n.startswith('user_')][:10]
             top_10_centrality["betweenness"] = [{"id": n.replace('user_',''), "username": G.nodes[n].get('username', ''), "metrics": {"betweenness": round(v,4)}} for n, v in sorted(bet_cent.items(), key=lambda x: x[1], reverse=True) if n.startswith('user_')][:10]
+            top_10_centrality["closeness"] = [{"id": n.replace('user_',''), "username": G.nodes[n].get('username', ''), "metrics": {"closeness": round(v,4)}} for n, v in sorted(clo_cent.items(), key=lambda x: x[1], reverse=True) if n.startswith('user_')][:10]
+            top_10_centrality["eigenvector"] = [{"id": n.replace('user_',''), "username": G.nodes[n].get('username', ''), "metrics": {"eigenvector": round(v,4)}} for n, v in sorted(eig_cent.items(), key=lambda x: x[1], reverse=True) if n.startswith('user_')][:10]
 
+            # 5. Shortest Paths Sample
             if components and len(components[0]) > 2:
                 comp = list(components[0])
                 sample_pairs = list(itertools.combinations(comp[:15], 2))
@@ -271,10 +312,29 @@ def get_network_metrics_summary(source: str = "app"):
                         top_10_paths.append({"source_username": G.nodes[u1].get('username'), "target_username": G.nodes[u2].get('username'), "distance_hops": int((len(path)-1)/2), "path_details": p_str})
                     except nx.NetworkXNoPath: pass
 
-            if all_cliques:
-                all_cliques.sort(key=len, reverse=True)
-                clique_metrics["global_metrics"] = {"total_cliques": len(all_cliques), "largest_clique_size": len(all_cliques[0])}
-                clique_metrics["top_10_cliques"] = [{"rank": i+1, "size": len(c), "members": [{"username": G.nodes[u].get('username')} for u in c]} for i, c in enumerate(all_cliques[:10])]
+            # 6. Analisis Deskriptif
+            avg_degree = global_metrics.get("average_of_average_degrees", 0)
+            if avg_degree == 0:
+                descriptive_analysis["pola_interaksi"] = "Belum ada interaksi yang memadai antar pengguna untuk membentuk sebuah jaringan."
+            elif avg_degree <= 2.5:
+                descriptive_analysis["pola_interaksi"] = f"Informasi di dalam jaringan menyebar dengan sangat cepat. Audiens sangat erat dengan rata-rata jarak sosial hanya {avg_degree} langkah."
+            else:
+                descriptive_analysis["pola_interaksi"] = f"Audiens terfragmentasi. Rata-rata jarak sosial mencapai {avg_degree} langkah."
+
+            top_degree = top_10_centrality["degree"][0] if top_10_centrality["degree"] else None
+            top_betw = top_10_centrality["betweenness"][0] if top_10_centrality["betweenness"] else None
+            aktor_text = ""
+            if top_degree:
+                aktor_text += f"'{top_degree['username']}' adalah Key Opinion Leader utama. "
+            if top_betw:
+                aktor_text += f"'{top_betw['username']}' bertindak sebagai Information Broker krusial."
+            descriptive_analysis["aktor_pengaruh"] = aktor_text if aktor_text else "Aktor dominan belum teridentifikasi."
+
+            total_cliq = clique_metrics["global_metrics"].get("total_cliques", 0)
+            if total_cliq > 0:
+                descriptive_analysis["komunitas"] = f"Terdapat {total_cliq} sub-grup eksklusif (cliques) di dalam jaringan."
+            else:
+                descriptive_analysis["komunitas"] = "Grup eksklusif belum terdeteksi."
 
         process_time = round(time.perf_counter() - t_start, 3)
 
@@ -291,7 +351,7 @@ def get_network_metrics_summary(source: str = "app"):
         import traceback
         traceback.print_exc()
         return {"status": "error", "message": str(e)}
-
+        
 def get_live_analytics_summary():
     try:
         active_users_data = {"last_30_min": 0, "last_5_min": 0} 
