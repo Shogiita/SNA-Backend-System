@@ -1,6 +1,8 @@
 import io
 import json
 import os
+import asyncio
+import tempfile
 import pandas as pd
 import networkx as nx
 import leidenalg as la
@@ -9,36 +11,34 @@ import gspread
 import datetime
 from google.oauth2.service_account import Credentials
 from fastapi import HTTPException, Response, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse 
 from app.database import neo4j_driver, db
 from app import config
 
-# Konfigurasi GSpread menggunakan Service Account Firebase yang sudah ada
+# =================================================================
+# MASUKKAN ID SPREADSHEET DARI TAHAP 1 DI SINI
+# =================================================================
+MASTER_SHEET_ID = "MASUKKAN_ID_SPREADSHEET_DISINI"
+
 def get_gspread_client():
     try:
         scopes = [
             'https://www.googleapis.com/auth/spreadsheets',
             'https://www.googleapis.com/auth/drive'
         ]
-        creds = Credentials.from_service_account_info(config.FIREBASE_CREDENTIALS, scopes=scopes)
+        creds = Credentials.from_service_account_file('serviceAccountKey.json', scopes=scopes)
         return gspread.authorize(creds)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal otentikasi Google Sheets: {str(e)}")
 
-
 def get_master_dataframe(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True) -> pd.DataFrame:
-    """Mengambil SEMUA data, memformat tanggal, menambah link, memfilter rentang waktu, dan memfilter kolom (custom)"""
     dataset = []
 
-    # -----------------------------------------------------------------
-    # A. SUMBER DATA: APP (Neo4j)
-    # -----------------------------------------------------------------
     if source_type == 'app':
-        # Mengambil dari Neo4j (KawanSS / Infoss beserta komentarnya)
         query = """
-        MATCH (author:User)-[:POSTED|AUTHORED]->(p)
-        WHERE (p:KawanSS OR p:Infoss) AND (p.isDeleted = false OR p.isDeleted IS NULL)
-        OPTIONAL MATCH (c_author:User)-[:WROTE]->(c)-[:COMMENTED_ON]->(p)
+        MATCH (author:FirebaseUser)-[:POSTED_FB]->(p)
+        WHERE (p:FirebaseKawanSS OR p:FirebaseInfoss) AND (p.isDeleted = false OR p.isDeleted IS NULL)
+        OPTIONAL MATCH (c_author:FirebaseUser)-[:WROTE_FB]->(c)-[:COMMENTED_ON_FB]->(p)
         RETURN 
             coalesce(author.username, author.nama, author.id) AS Post_Author,
             coalesce(p.judul, p.title, p.deskripsi, 'No Content') AS Post_Content,
@@ -53,16 +53,18 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
             0 AS Comment_Replies_Count,
             p.id AS Target_Post_ID
         """
-        with neo4j_driver.session() as session:
-            records = session.run(query).data()
+        try:
+            with neo4j_driver.session() as session:
+                records = session.run(query).data()
+        except Exception as db_err:
+            raise HTTPException(status_code=500, detail=f"Koneksi Neo4j terputus: {str(db_err)}")
             
         for r in records:
-            # Baris untuk Postingan Utama
             dataset.append({
                 "Interaction_Type": "POST",
                 "Source_User": r["Post_Author"],
                 "Target": r["Target_Post_ID"],
-                "Post_Link": "", # App internal tidak punya permalink eksternal
+                "Post_Link": "",
                 "User_Pembuat_Post": r["Post_Author"],
                 "Post": r["Post_Content"],
                 "Tanggal_Upload": r["Upload_Date"],
@@ -75,8 +77,6 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
                 "Jumlah_Like_Komentar": 0,
                 "Jumlah_Reply_Komentar": 0
             })
-            
-            # Baris untuk Komentar (Jika ada)
             if r["Comment_Author"] and r["Comment_Content"]:
                 dataset.append({
                     "Interaction_Type": "COMMENT",
@@ -96,13 +96,10 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
                     "Jumlah_Reply_Komentar": r["Comment_Replies_Count"]
                 })
 
-    # -----------------------------------------------------------------
-    # B. SUMBER DATA: INSTAGRAM (JSON Cache)
-    # -----------------------------------------------------------------
     elif source_type == 'instagram':
         cache_file = "instagram_data_cache.json"
         if not os.path.exists(cache_file):
-            raise HTTPException(status_code=404, detail="Data Instagram belum disinkronisasi. Jalankan /sna/ingest")
+            raise HTTPException(status_code=404, detail="Data Instagram belum disinkronisasi.")
             
         with open(cache_file, "r", encoding="utf-8") as f:
             posts = json.load(f)
@@ -111,11 +108,10 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
             post_id = p.get('id')
             post_caption = p.get('caption', '').replace('\n', ' ')
             post_author = p.get('username', 'Suara_Surabaya_Official')
-            permalink = p.get('permalink', '') # Ambil link post IG
+            permalink = p.get('permalink', '') 
             post_likes = p.get('like_count', 0)
             post_comments_count = p.get('comments_count', 0)
             
-            # Post Utama
             dataset.append({
                 "Interaction_Type": "POST",
                 "Source_User": post_author,
@@ -133,12 +129,9 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
                 "Jumlah_Like_Komentar": 0,
                 "Jumlah_Reply_Komentar": 0
             })
-            
-            # Komentar & Reply
             for act in p.get('interactions', []):
                 i_type = act.get('interaction_type', 'COMMENT')
                 content = act.get('content', '').replace('\n', ' ')
-                
                 dataset.append({
                     "Interaction_Type": i_type,
                     "Source_User": act.get('source_username', 'Unknown'),
@@ -159,148 +152,105 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
     else:
         raise HTTPException(status_code=400, detail="source_type harus 'app' atau 'instagram'")
 
-    # Konversi ke Pandas DataFrame lalu hapus duplikasi
-    df = pd.DataFrame(dataset)
-    df = df.drop_duplicates()
+    df = pd.DataFrame(dataset).drop_duplicates()
+    if df.empty: return df
 
-    if df.empty:
-        return df
-
-    # -----------------------------------------------------------------
-    # C. FILTER TANGGAL (AMAT PENTING: PARSING WAKTU)
-    # -----------------------------------------------------------------
     def parse_to_datetime(val):
-        if pd.isna(val) or str(val).strip() == "":
-            return pd.NaT
+        if pd.isna(val) or str(val).strip() == "": return pd.NaT
         try:
-            # Jika ISO string (Instagram) spt: 2024-05-10T12:00:00+0000
             if isinstance(val, str) and 'T' in val:
                 dt = pd.to_datetime(val)
-                if dt.tzinfo is not None:
-                    dt = dt.tz_localize(None) # Hapus timezone agar perbandingan valid
+                if dt.tzinfo is not None: dt = dt.tz_localize(None) 
                 return dt
-            
-            # Jika angka dari Firestore/Neo4j
             val_num = float(val)
-            if val_num > 1e11:  # milidetik
-                return pd.to_datetime(val_num, unit='ms')
-            else:  # detik
-                return pd.to_datetime(val_num, unit='s')
-        except:
-            return pd.NaT
+            return pd.to_datetime(val_num, unit='ms') if val_num > 1e11 else pd.to_datetime(val_num, unit='s')
+        except: return pd.NaT
 
-    # 1. Konversi SEMUA data tanggal ke objek datetime yang terstandarisasi
     df['Datetime_Obj'] = df['Tanggal_Upload'].apply(parse_to_datetime)
 
-    # 2. Lakukan Filter menggunakan Objek Waktu (Bukan String)
     if start_date:
         try:
-            start_dt = pd.to_datetime(start_date)
-            df = df[df['Datetime_Obj'] >= start_dt]
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Format start_date salah: {e}")
-
+            df = df[df['Datetime_Obj'] >= pd.to_datetime(start_date)]
+        except: pass
     if end_date:
         try:
-            # Tambah 1 hari kurang 1 detik agar filter mencakup seluruh jam di hari terakhir
-            end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=1, seconds=-1)
-            df = df[df['Datetime_Obj'] <= end_dt]
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Format end_date salah: {e}")
+            df = df[df['Datetime_Obj'] <= (pd.to_datetime(end_date) + pd.Timedelta(days=1, seconds=-1))]
+        except: pass
 
-    # 3. Ubah kembali menjadi String rapi khusus untuk tampilan di Excel
     df['Tanggal_Upload'] = df['Datetime_Obj'].apply(lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notnull(x) else "")
-    
-    # Hapus kolom bantuan
     df = df.drop(columns=['Datetime_Obj'])
 
-    # -----------------------------------------------------------------
-    # D. FILTER KOLOM (BERDASARKAN REQUEST USER)
-    # -----------------------------------------------------------------
     if not export_all and selected_columns is not None:
-        # Kunci kolom mandatory agar jika diimport lagi tidak error saat generate graph
-        mandatory_columns = ['Interaction_Type', 'Source_User', 'Target', 'Post_Link', 'Post']
-        final_columns = []
-        
-        # 1. Pastikan kolom mandatory ada di depan
-        for col in mandatory_columns:
-            if col in df.columns:
-                final_columns.append(col)
-                
-        # 2. Tambahkan kolom pilihan user (hindari duplikasi)
-        for col in selected_columns:
-            if col in df.columns and col not in final_columns:
-                final_columns.append(col)
-                
-        # 3. Potong DataFrame
-        df = df[final_columns]
+        mandatory = ['Interaction_Type', 'Source_User', 'Target', 'Post_Link', 'Post']
+        final_cols = [c for c in mandatory if c in df.columns]
+        for c in selected_columns:
+            if c in df.columns and c not in final_cols: final_cols.append(c)
+        df = df[final_cols]
 
     return df
 
-# =====================================================================
-# 2. EXPORT EXCEL
-# =====================================================================
-async def export_to_excel(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
-    df = get_master_dataframe(source_type, start_date, end_date, selected_columns, export_all)
-    
-    if df.empty:
-        raise HTTPException(status_code=404, detail="Tidak ada data yang ditemukan pada rentang waktu tersebut.")
-        
-    stream = io.BytesIO()
-    with pd.ExcelWriter(stream, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='SNA_Dataset')
-        
-    stream.seek(0)
-    filename = f"SNA_Export_{source_type.upper()}.xlsx"
-    return StreamingResponse(
-        stream, 
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
-
-async def link_to_sheets(email: str, source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True, existing_sheet_url: str = None):
-    if source_type not in ['app', 'instagram']:
-        raise HTTPException(status_code=400, detail="Pilihan sumber data (source_type) hanya boleh 'app' atau 'instagram'")
-
-    gc = get_gspread_client()
+async def export_to_csv(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
     try:
-        # Cek apakah user memberikan URL Sheet yang sudah ada
-        if existing_sheet_url:
+        df = await asyncio.to_thread(get_master_dataframe, source_type, start_date, end_date, selected_columns, export_all)
+        if df is None or df.empty:
+            raise HTTPException(status_code=404, detail="Tidak ada data ditemukan.")
+        
+        fd, temp_path = tempfile.mkstemp(suffix=".csv")
+        await asyncio.to_thread(df.to_csv, temp_path, index=False, encoding='utf-8-sig')
+        os.close(fd)
+        
+        return FileResponse(path=temp_path, filename=f"SNA_Dataset_{source_type.upper()}.csv", media_type="text/csv")
+    except Exception as e:
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail=str(e))
+
+# =====================================================================
+# SPREADSHEET LINKING (BINDING MULTIPLE SPREADSHEETS)
+# =====================================================================
+async def link_to_sheets(existing_sheet_url: str, source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
+    if not existing_sheet_url:
+        raise HTTPException(status_code=400, detail="URL Spreadsheet wajib diisi.")
+        
+    if source_type not in ['app', 'instagram']:
+        raise HTTPException(status_code=400, detail="Pilihan sumber data hanya 'app' atau 'instagram'")
+
+    try:
+        df = await asyncio.to_thread(get_master_dataframe, source_type, start_date, end_date, selected_columns, export_all)
+        if df.empty:
+            raise ValueError("Tidak ada data untuk diekspor pada rentang waktu tersebut.")
+
+        def _gspread_operations():
+            gc = get_gspread_client()
             try:
-                # OPSI 2: Menggunakan Sheet yang sudah dibuat user
+                # Membuka spreadsheet berdasarkan URL yang di-paste user
                 sh = gc.open_by_url(existing_sheet_url)
-                sheet_name = sh.title
-            except gspread.exceptions.SpreadsheetNotFound:
-                # Tangani error kosong dari gspread dan berikan instruksi jelas
-                sa_email = config.FIREBASE_CREDENTIALS.get("client_email", "firebase-adminsdk-bko4f@kp-ss-a8e05.iam.gserviceaccount.com")
-                raise HTTPException(
-                    status_code=403, 
-                    detail=f"Akses Ditolak! Anda belum membagikan Spreadsheet tersebut ke sistem. Buka Google Sheets Anda, klik 'Share/Bagikan', lalu tambahkan email ini sebagai Editor: {sa_email}"
-                )
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"URL Spreadsheet tidak valid: {str(e)}")
-        else:
-            # OPSI 1: Buat file baru dari nol
-            sheet_name = f"SNA_Dataset_{source_type.upper()}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
-            sh = gc.create(sheet_name)
-            sh.share(email, perm_type='user', role='writer')
+            except Exception:
+                import json
+                with open('serviceAccountKey.json') as f:
+                    sa_email = json.load(f).get("client_email")
+                raise ValueError(f"Akses Ditolak! Pastikan Anda sudah memberikan akses 'Editor' pada Spreadsheet Anda ke email: {sa_email}")
+            
+            tab_name = "DATA_APP" if source_type == 'app' else "DATA_IG"
+            
+            # Cari tab-nya. Jika tidak ada, buatkan tab baru di dalam Spreadsheet milik user.
+            try:
+                worksheet = sh.worksheet(tab_name)
+            except gspread.exceptions.WorksheetNotFound:
+                worksheet = sh.add_worksheet(title=tab_name, rows=1, cols=1)
+
+            worksheet.clear()
+            safe_df = df.fillna("").astype(str)
+            worksheet.update([safe_df.columns.tolist()] + safe_df.values.tolist())
+            
+            return sh.id, sh.url, sh.title
+
+        sh_id, sh_url, s_name = await asyncio.to_thread(_gspread_operations)
         
-        # Ekstrak dan masukkan data
-        df = get_master_dataframe(source_type, start_date, end_date, selected_columns, export_all)
-        worksheet = sh.get_worksheet(0)
-        
-        if not df.empty:
-            if existing_sheet_url:
-                worksheet.clear() # Bersihkan isi sheet lama jika pakai opsi existing
-            worksheet.update([df.columns.values.tolist()] + df.values.tolist())
-        
-        # Simpan metadata ke Firestore
         doc_data = {
-            "sheet_id": sh.id,
-            "sheet_url": sh.url,
-            "sheet_name": sheet_name,
+            "sheet_id": sh_id,
+            "sheet_url": sh_url,
+            "sheet_name": f"{s_name} ({source_type.upper()})",
             "source_type": source_type,
-            "shared_email": email,
             "created_at": datetime.datetime.now().isoformat()
         }
         
@@ -308,189 +258,102 @@ async def link_to_sheets(email: str, source_type: str, start_date: str = None, e
         
         return {
             "status": "success", 
-            "message": f"Data {source_type.upper()} berhasil ditautkan ke Spreadsheet.", 
-            "data": {
-                "id": doc_ref.id,
-                "sheet_name": sheet_name,
-                "source_type": source_type,
-                "status": "Linked"
-            }
+            "message": f"Data berhasil ditautkan ke Spreadsheet Anda.", 
+            "data": {"id": doc_ref.id, "sheet_url": sh_url}
         }
+        
+    except ValueError as ve:
+        raise HTTPException(status_code=403, detail=str(ve))
     except Exception as e:
-        if isinstance(e, HTTPException): raise e
-        raise HTTPException(status_code=500, detail=f"Gagal menautkan ke Sheets: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 async def get_all_linked_sheets():
-    """Mengambil semua daftar spreadsheet untuk ditampilkan di List Frontend"""
     try:
-        # Ambil dari Firestore, urutkan dari yang terbaru
         docs = db.collection('linked_sheets').order_by('created_at', direction='DESCENDING').stream()
-        sheets = []
-        for doc in docs:
-            data = doc.to_dict()
-            data['id'] = doc.id
-            sheets.append(data)
-            
-        return {"status": "success", "data": sheets}
+        return {"status": "success", "data": [{"id": d.id, **d.to_dict()} for d in docs]}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gagal mengambil daftar sheets: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def sync_to_sheets(sheet_id: str, source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
-    gc = get_gspread_client()
     try:
-        sh = gc.open_by_key(sheet_id)
-        worksheet = sh.get_worksheet(0)
-        worksheet.clear()
-        
-        df = get_master_dataframe(source_type, start_date, end_date, selected_columns, export_all)
-        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
-        return {"status": "success", "message": "Data di Spreadsheet berhasil disinkronisasi!"}
+        df = await asyncio.to_thread(get_master_dataframe, source_type, start_date, end_date, selected_columns, export_all)
+        def _sync():
+            gc = get_gspread_client()
+            sh = gc.open_by_key(MASTER_SHEET_ID)
+            tab_name = "DATA_APP" if source_type == 'app' else "DATA_IG"
+            ws = sh.worksheet(tab_name)
+            ws.clear()
+            if not df.empty:
+                safe_df = df.fillna("").astype(str)
+                ws.update([safe_df.columns.tolist()] + safe_df.values.tolist())
+        await asyncio.to_thread(_sync)
+        return {"status": "success", "message": "Sinkronisasi berhasil!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 async def unlink_sheets(doc_id: str):
-    """Unlink (Hapus) berdasarkan Document ID dari Firestore"""
-    gc = get_gspread_client()
     try:
-        doc_ref = db.collection('linked_sheets').document(doc_id)
-        doc = doc_ref.get()
-        
-        if not doc.exists:
-            raise HTTPException(status_code=404, detail="Tautan sheet tidak ditemukan di database.")
-            
-        sheet_data = doc.to_dict()
-        sheet_id = sheet_data.get("sheet_id")
-        
-        # Hapus file secara fisik dari Drive Service Account
-        try:
-            gc.del_spreadsheet(sheet_id)
-        except Exception as e:
-            print(f"Warning: File mungkin sudah terhapus manual di Drive: {e}")
-            
-        # Hapus referensi dari Firestore (Unlink)
-        doc_ref.delete()
-        
-        return {"status": "success", "message": "Spreadsheet berhasil di-unlink."}
+        db.collection('linked_sheets').document(doc_id).delete()
+        return {"status": "success", "message": "Tautan dihapus dari Dashboard."}
     except Exception as e:
-        if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=str(e))
 
 async def unlink_all_sheets():
-    """Menghapus SEMUA sheet yang ada di database (Clear All)"""
-    gc = get_gspread_client()
     try:
         docs = db.collection('linked_sheets').stream()
-        deleted_count = 0
-        
-        for doc in docs:
-            sheet_data = doc.to_dict()
-            sheet_id = sheet_data.get("sheet_id")
-            
-            # Hapus file fisiknya
-            try:
-                gc.del_spreadsheet(sheet_id)
-            except Exception as e:
-                pass # Abaikan jika file fisik sudah tidak ada
-            
-            # Hapus dari database
-            db.collection('linked_sheets').document(doc.id).delete()
-            deleted_count += 1
-            
-        return {"status": "success", "message": f"Berhasil menghapus (unlink) {deleted_count} sheets."}
+        for doc in docs: db.collection('linked_sheets').document(doc.id).delete()
+        return {"status": "success", "message": "Semua tautan dihapus."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# =====================================================================
-# 4. IMPORT & CALCULATE CENTRALITY (EXCEL / SHEETS)
-# =====================================================================
 def _calculate_graph_from_dataframe(df: pd.DataFrame):
-    """Membaca format file buatan kita sendiri untuk membangun Graf dan Centrality"""
     G = nx.DiGraph()
-    
-    for index, row in df.iterrows():
+    for _, row in df.iterrows():
         source = str(row.get('Source_User', '')).strip()
         target = str(row.get('Target', '')).strip()
         i_type = str(row.get('Interaction_Type', 'POST')).upper()
-        
         if not source or source == 'nan': continue
-            
         s_node = f"user_{source}"
-        if not G.has_node(s_node):
-            G.add_node(s_node, type="user", label=source)
-            
+        if not G.has_node(s_node): G.add_node(s_node, type="user", label=source)
         if i_type == 'POST':
             t_node = f"post_{target}"
-            if not G.has_node(t_node):
-                # NOTE: Menggunakan kolom 'Post' hasil request Anda
-                G.add_node(t_node, type="post", label=str(row.get('Post', ''))[:20])
+            if not G.has_node(t_node): G.add_node(t_node, type="post", label=str(row.get('Post', ''))[:20])
             G.add_edge(s_node, t_node, weight=5, type="AUTHORED")
-            
         elif i_type in ['COMMENT', 'REPLY']:
             t_node = f"post_{target}" if i_type == 'COMMENT' else f"user_{target}"
-            if not G.has_node(t_node):
-                G.add_node(t_node, type="post" if i_type == 'COMMENT' else "user", label=target)
-            
-            if G.has_edge(s_node, t_node):
-                G[s_node][t_node]['weight'] += 3
-            else:
-                G.add_edge(s_node, t_node, weight=3, type=i_type)
+            if not G.has_node(t_node): G.add_node(t_node, type="post" if i_type == 'COMMENT' else "user", label=target)
+            if G.has_edge(s_node, t_node): G[s_node][t_node]['weight'] += 3
+            else: G.add_edge(s_node, t_node, weight=3, type=i_type)
 
     G.remove_nodes_from(list(nx.isolates(G)))
-    if G.number_of_nodes() == 0:
-        raise HTTPException(status_code=400, detail="Format data kosong atau tidak valid.")
-
-    for u, v, d in G.edges(data=True):
-        d['distance'] = 1.0 / d['weight'] if d.get('weight', 1) > 0 else 1.0
-
+    if G.number_of_nodes() == 0: raise HTTPException(status_code=400, detail="Data kosong.")
+    for u, v, d in G.edges(data=True): d['distance'] = 1.0 / d['weight'] if d.get('weight', 1) > 0 else 1.0
     deg_cent = nx.degree_centrality(G)
     bet_cent = nx.betweenness_centrality(G, weight='distance')
     clo_cent = nx.closeness_centrality(G, distance='distance')
-    
-    try:
-        eig_cent = nx.eigenvector_centrality(G, weight='weight', max_iter=1000)
-    except:
-        eig_cent = {n: 0.0 for n in G.nodes()}
+    try: eig_cent = nx.eigenvector_centrality(G, weight='weight', max_iter=1000)
+    except: eig_cent = {n: 0.0 for n in G.nodes()}
 
     ig_G = ig.Graph.TupleList(G.edges(), directed=True)
     partition = la.find_partition(ig_G, la.ModularityVertexPartition, n_iterations=-1)
-    community_map = {ig_G.vs[node.index]['name']: comm_id for comm_id, members in enumerate(partition) for node in members}
+    comm_map = {ig_G.vs[node.index]['name']: c_id for c_id, members in enumerate(partition) for node in members}
 
-    nodes_out = []
-    for n in G.nodes():
-        nodes_out.append({
-            "id": n,
-            "label": G.nodes[n].get('label', n),
-            "attributes": {"community": community_map.get(n, 0)},
-            "metrics": {
-                "degree": deg_cent.get(n, 0.0),
-                "betweenness": bet_cent.get(n, 0.0),
-                "closeness": clo_cent.get(n, 0.0),
-                "eigenvector": eig_cent.get(n, 0.0)
-            }
-        })
-
-    return {
-        "meta": {"total_nodes": G.number_of_nodes(), "total_edges": G.number_of_edges()},
-        "graph_data": {
-            "nodes": nodes_out,
-            "edges": [{"source": u, "target": v, "weight": d.get('weight', 1)} for u, v, d in G.edges(data=True)]
-        }
-    }
+    nodes_out = [{"id": n, "label": G.nodes[n].get('label', n), "attributes": {"community": comm_map.get(n, 0)}, "metrics": {"degree": deg_cent.get(n, 0.0), "betweenness": bet_cent.get(n, 0.0), "closeness": clo_cent.get(n, 0.0), "eigenvector": eig_cent.get(n, 0.0)}} for n in G.nodes()]
+    return {"meta": {"total_nodes": G.number_of_nodes(), "total_edges": G.number_of_edges()}, "graph_data": {"nodes": nodes_out, "edges": [{"source": u, "target": v, "weight": d.get('weight', 1)} for u, v, d in G.edges(data=True)]}}
 
 async def import_from_excel(file: UploadFile):
     try:
         content = await file.read()
-        df = pd.read_excel(io.BytesIO(content))
-        return _calculate_graph_from_dataframe(df)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Gagal memproses file Excel: {str(e)}")
+        df = await asyncio.to_thread(pd.read_excel, io.BytesIO(content))
+        return await asyncio.to_thread(_calculate_graph_from_dataframe, df)
+    except Exception as e: raise HTTPException(status_code=400, detail=str(e))
 
 async def import_from_sheets(sheet_id: str):
-    gc = get_gspread_client()
     try:
-        sh = gc.open_by_key(sheet_id)
-        worksheet = sh.get_worksheet(0)
-        data = worksheet.get_all_records()
-        df = pd.DataFrame(data)
-        return _calculate_graph_from_dataframe(df)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Gagal memproses Google Sheets: {str(e)}")
+        def _fetch_sheet():
+            gc = get_gspread_client()
+            sh = gc.open_by_key(sheet_id)
+            return sh.get_worksheet(0).get_all_records()
+        df = pd.DataFrame(await asyncio.to_thread(_fetch_sheet))
+        return await asyncio.to_thread(_calculate_graph_from_dataframe, df)
+    except Exception as e: raise HTTPException(status_code=400, detail=str(e))

@@ -2,28 +2,23 @@ import pytest
 from unittest.mock import patch, MagicMock
 import networkx as nx
 
-# 1. Test SNA Metrics dari API Instagram
-@patch("app.controllers.sna_controller.session.get")
-def test_get_instagram_metrics_success(mock_get, api_client):
-    # Arrange: Mock response library 'requests'
-    mock_resp = MagicMock()
-    mock_resp.json.return_value = {
-        "data": [
-            {
-                "id": "1", 
-                "timestamp": "2026-04-09T10:00:00+0000", 
-                "caption": "Halo #Surabaya #Jatim", 
-                "like_count": 100, 
-                "comments_count": 5
-            }
-        ]
-    }
-    mock_get.return_value = mock_resp
+@patch("app.controllers.sna_controller.neo4j_driver.session")
+def test_get_instagram_metrics_success(mock_session, api_client):
+    mock_tx = MagicMock()
+    mock_tx.run.return_value.data.return_value = [
+        {
+            "id": "1", 
+            "permalink": "https://instagram.com/p/1",
+            "timestamp": "2026-04-09T10:00:00+0000", 
+            "caption": "Halo #Surabaya #Jatim", 
+            "like_count": 100, 
+            "comments_count": 5
+        }
+    ]
+    mock_session.return_value.__enter__.return_value = mock_tx
     
-    # Act
     response = api_client.get("/sna/metrics")
     
-    # Assert
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"

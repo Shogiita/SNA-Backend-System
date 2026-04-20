@@ -1,15 +1,11 @@
 import pytest
 from unittest.mock import patch, MagicMock, mock_open
 
-# =====================================================================
-# 1. TEST DASHBOARD UTAMA
-# =====================================================================
 @patch("app.controllers.report_controller.neo4j_driver.session")
 @patch("app.controllers.report_controller.get_realtime_active_users")
 def test_dashboard_summary_success(mock_ga_users, mock_session, api_client):
     """
     Menguji Endpoint utama dashboard yang menggabungkan stat, top content, dan SNA.
-    Fungsi ini bersifat synchronous di endpointnya, jadi tidak menggunakan mark.asyncio
     """
     # Arrange: Mock response dari Google Analytics
     mock_ga_users.return_value = {"last_30_min": 15, "last_5_min": 5}
@@ -38,8 +34,14 @@ def test_dashboard_summary_success(mock_ga_users, mock_session, api_client):
         {"uid": "user_2", "uname": "Budi", "username": "budi123", "pid": "p1"}
     ]
     
-    # Atur agar pemanggilan session.run secara berurutan mengembalikan mock yang sesuai
-    mock_tx.run.side_effect = [mock_stat_res, mock_top_content_res, mock_sna_res]
+    # d. PERBAIKAN: Mock data untuk Query 4 (Hashtags)
+    mock_ht_res = MagicMock()
+    mock_ht_res.data.return_value = [
+        {"text": "Informasi cuaca hari ini di #Surabaya"}
+    ]
+    
+    # PERBAIKAN: Tambahkan mock_ht_res sebagai elemen ke-4
+    mock_tx.run.side_effect = [mock_stat_res, mock_top_content_res, mock_sna_res, mock_ht_res]
     mock_session.return_value.__enter__.return_value = mock_tx
 
     # Act
@@ -50,18 +52,14 @@ def test_dashboard_summary_success(mock_ga_users, mock_session, api_client):
     data = response.json()
     assert data["status"] == "success"
     
-    # Validasi Statistik Terhitung Benar
     assert data["data"]["users"]["total"] == 100
-    assert data["data"]["users"]["growth_percentage"] == 200.0 # (10 / 5) * 100
+    assert data["data"]["users"]["growth_percentage"] == 200.0
     
-    # Validasi Data Top Content Terbaca
     assert len(data["data"]["top_content"]) == 1
     assert data["data"]["top_content"][0]["judul"] == "Berita 1"
     
-    # Validasi SNA Terhitung Berdasarkan Mock
     assert "top_10_centrality" in data["data"]
     assert data["data"]["integrations"]["google_analytics"]["active_users_last_30_min"] == 15
-
 
 # =====================================================================
 # 2. TEST GOOGLE ANALYTICS (REALTIME)
@@ -150,7 +148,6 @@ def test_export_neo4j_csv_empty(mock_session, api_client):
     assert response.status_code == 404
     assert "Tidak ada data" in response.json()["detail"]
 
-
 @patch("os.path.exists", return_value=True)
 @patch("builtins.open", new_callable=mock_open, read_data='[{"id": "ig_1", "timestamp": "2026-04-09", "like_count": 150, "interactions": [{"id": 1}], "caption": "SNA is cool!"}]')
 def test_export_instagram_csv_success(mock_file, mock_exists, api_client):
@@ -169,10 +166,6 @@ def test_export_instagram_csv_no_cache(mock_exists, api_client):
     assert response.status_code == 404
     assert "Cache Instagram tidak ditemukan" in response.json()["detail"]
 
-
-# =====================================================================
-# 5. TEST STATIC ANALYTICS SUMMARY
-# =====================================================================
 def test_get_analytics_summary(api_client):
     response = api_client.get("/report/analytics")
     assert response.status_code == 200

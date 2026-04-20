@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 
 os.environ["HTTP_PROXY"] = ""
 os.environ["HTTPS_PROXY"] = ""
@@ -29,13 +30,33 @@ from app.routers import (
     integration_router
 )
 
+scheduler = BackgroundScheduler()
+
+# Menggantikan @app.on_event("startup") dan @app.on_event("shutdown")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- LOGIKA STARTUP ---
+    scheduler.add_job(sync_instagram_to_neo4j, 'interval', hours=1, args=[False])
+    scheduler.start()
+
+    scheduler.add_job(get_live_analytics_summary, 'interval', minutes=2)
+
+    print("🚀 APScheduler berjalan: Auto-update IG-Neo4j setiap 1 jam.")
+    print("🚀 APScheduler berjalan: Auto-hit GA4 Live Analytics setiap 2 menit.")
+    
+    yield  # Menandakan aplikasi sedang berjalan melayani request
+    
+    # --- LOGIKA SHUTDOWN ---
+    scheduler.shutdown()
+    print("🛑 APScheduler dihentikan.")
+
+
 app = FastAPI(
     title="SNA Backend System API",
     description="API terstruktur dengan Router dan Controller.",
-    version="0.5.0", 
+    version="0.5.0",
+    lifespan=lifespan  # Mendaftarkan fungsi lifespan ke aplikasi
 )
-
-scheduler = BackgroundScheduler()
 
 app.include_router(csv_graph_router.router)
 app.include_router(user_router.router)
@@ -53,21 +74,6 @@ app.include_router(integration_router.router)
 @app.get("/")
 def read_root():
     return {"message": "SNA Backend System is running with CORS Enabled for Flutter!"}
-
-@app.on_event("startup")
-def startup_event():
-    scheduler.add_job(sync_instagram_to_neo4j, 'interval', hours=1, args=[False])
-    scheduler.start()
-
-    scheduler.add_job(get_live_analytics_summary, 'interval', minutes=2)
-
-    print("🚀 APScheduler berjalan: Auto-update IG-Neo4j setiap 1 jam.")
-    print("🚀 APScheduler berjalan: Auto-hit GA4 Live Analytics setiap 2 menit.")
-
-@app.on_event("shutdown")
-def shutdown_event():
-    scheduler.shutdown()
-    print("🛑 APScheduler dihentikan.")
 
 # app.add_middleware(
 #     CORSMiddleware,
