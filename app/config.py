@@ -41,9 +41,9 @@ FIREBASE_CREDENTIALS = {
     "client_x509_cert_url": os.getenv("FIREBASE_CLIENT_CERT_URL")
 }
 
-# === TAMBAHAN UNTUK GOOGLE SHEETS SERVICE ACCOUNT ===
-gcp_private_key = os.getenv("GCP_PRIVATE_KEY")
+gcp_private_key = os.getenv("GCP_PRIVATE_KEY","")
 if gcp_private_key:
+    gcp_private_key = gcp_private_key.strip('"').strip("'")
     gcp_private_key = gcp_private_key.replace('\\n', '\n')
 
 GOOGLE_CREDENTIALS = {
