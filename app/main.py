@@ -6,7 +6,7 @@ os.environ["HTTPS_PROXY"] = ""
 os.environ["NO_PROXY"] = "*"
 
 from fastapi import FastAPI
-# from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from app.controllers.sna_controller import sync_instagram_to_neo4j
 from app.controllers.report_controller import get_live_analytics_summary
@@ -75,11 +75,11 @@ app.include_router(integration_router.router)
 def read_root():
     return {"message": "SNA Backend System is running with CORS Enabled for Flutter!"}
 
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],  
-#     allow_credentials=True,
-#     allow_methods=["*"],  
-#     allow_headers=["*"],  
-#     expose_headers=["X-Process-Time"], 
-# )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],  
+    allow_headers=["*"],  
+    expose_headers=["X-Process-Time"], 
+)

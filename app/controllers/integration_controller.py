@@ -15,6 +15,9 @@ from fastapi.responses import StreamingResponse, FileResponse
 from app.database import neo4j_driver, db
 from app import config
 
+# Import dictionary GOOGLE_CREDENTIALS dari config.py
+from app.config import GOOGLE_CREDENTIALS
+
 # =================================================================
 # MASUKKAN ID SPREADSHEET DARI TAHAP 1 DI SINI
 # =================================================================
@@ -26,7 +29,8 @@ def get_gspread_client():
             'https://www.googleapis.com/auth/spreadsheets',
             'https://www.googleapis.com/auth/drive'
         ]
-        creds = Credentials.from_service_account_file('serviceAccountKey.json', scopes=scopes)
+        # Menggunakan from_service_account_info untuk membaca dari memory/env
+        creds = Credentials.from_service_account_info(GOOGLE_CREDENTIALS, scopes=scopes)
         return gspread.authorize(creds)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal otentikasi Google Sheets: {str(e)}")
@@ -225,9 +229,8 @@ async def link_to_sheets(existing_sheet_url: str, source_type: str, start_date: 
                 # Membuka spreadsheet berdasarkan URL yang di-paste user
                 sh = gc.open_by_url(existing_sheet_url)
             except Exception:
-                import json
-                with open('serviceAccountKey.json') as f:
-                    sa_email = json.load(f).get("client_email")
+                # Mengambil email langsung dari dictionary GOOGLE_CREDENTIALS di memory
+                sa_email = GOOGLE_CREDENTIALS.get("client_email", "Email Service Account tidak ditemukan")
                 raise ValueError(f"Akses Ditolak! Pastikan Anda sudah memberikan akses 'Editor' pada Spreadsheet Anda ke email: {sa_email}")
             
             tab_name = "DATA_APP" if source_type == 'app' else "DATA_IG"

@@ -23,6 +23,7 @@ GRAPH_API_URL = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 if not IG_ACCESS_TOKEN or IG_ACCESS_TOKEN == "MASUKKAN_ACCESS_TOKEN_ANDA_YANG_SUDAH_DIGENERATE":
     print("PERINGATAN: INSTAGRAM_ACCESS_TOKEN belum diatur di file .env.")
 
+# Kredensial Firebase
 private_key = os.getenv("FIREBASE_PRIVATE_KEY")
 if private_key:
     private_key = private_key.replace('\\n', '\n')
@@ -38,4 +39,22 @@ FIREBASE_CREDENTIALS = {
     "token_uri": os.getenv("FIREBASE_TOKEN_URI"),
     "auth_provider_x509_cert_url": os.getenv("FIREBASE_AUTH_PROVIDER_CERT_URL"),
     "client_x509_cert_url": os.getenv("FIREBASE_CLIENT_CERT_URL")
+}
+
+# === TAMBAHAN UNTUK GOOGLE SHEETS SERVICE ACCOUNT ===
+gcp_private_key = os.getenv("GCP_PRIVATE_KEY")
+if gcp_private_key:
+    gcp_private_key = gcp_private_key.replace('\\n', '\n')
+
+GOOGLE_CREDENTIALS = {
+    "type": os.getenv("GCP_TYPE"),
+    "project_id": os.getenv("GCP_PROJECT_ID"),
+    "private_key_id": os.getenv("GCP_PRIVATE_KEY_ID"),
+    "private_key": gcp_private_key,
+    "client_email": os.getenv("GCP_CLIENT_EMAIL"),
+    "client_id": os.getenv("GCP_CLIENT_ID"),
+    "auth_uri": os.getenv("GCP_AUTH_URI"),
+    "token_uri": os.getenv("GCP_TOKEN_URI"),
+    "auth_provider_x509_cert_url": os.getenv("GCP_AUTH_PROVIDER_CERT_URL"),
+    "client_x509_cert_url": os.getenv("GCP_CLIENT_CERT_URL")
 }
