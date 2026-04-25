@@ -101,58 +101,72 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
                 })
 
     elif source_type == 'instagram':
-        cache_file = "instagram_data_cache.json"
-        if not os.path.exists(cache_file):
-            raise HTTPException(status_code=404, detail="Data Instagram belum disinkronisasi.")
+        # PERUBAHAN UTAMA: Mengambil data Instagram langsung dari Neo4j (bukan file cache.json)
+        query_ig = """
+        MATCH (author:InstagramUser)-[:POSTED_IG]->(p:InstagramPost)
+        OPTIONAL MATCH (c_author:InstagramUser)-[:COMMENTED_IG]->(c:InstagramComment)-[:ON_POST_IG]->(p)
+        RETURN 
+            coalesce(author.username, 'Suara_Surabaya_Official') AS Post_Author,
+            coalesce(p.caption, 'No Content') AS Post_Content,
+            coalesce(p.timestamp, '') AS Upload_Date,
+            coalesce(p.permalink, '') AS Permalink,
+            coalesce(toInteger(p.like_count), 0) AS Post_Likes,
+            coalesce(toInteger(p.comments_count), 0) AS Post_Comments,
+            coalesce(c_author.username, '') AS Comment_Author,
+            coalesce(c.text, '') AS Comment_Content,
+            coalesce(toInteger(c.like_count), 0) AS Comment_Likes,
+            p.id AS Target_Post_ID
+        """
+        
+        try:
+            with neo4j_driver.session() as session:
+                records_ig = session.run(query_ig).data()
+        except Exception as db_err:
+            raise HTTPException(status_code=500, detail=f"Koneksi Neo4j terputus saat mengambil data Instagram: {str(db_err)}")
             
-        with open(cache_file, "r", encoding="utf-8") as f:
-            posts = json.load(f)
+        if not records_ig:
+            raise HTTPException(status_code=404, detail="Data Instagram kosong di database Neo4j. Pastikan scheduler sinkronisasi sudah berjalan.")
             
-        for p in posts:
-            post_id = p.get('id')
-            post_caption = p.get('caption', '').replace('\n', ' ')
-            post_author = p.get('username', 'Suara_Surabaya_Official')
-            permalink = p.get('permalink', '') 
-            post_likes = p.get('like_count', 0)
-            post_comments_count = p.get('comments_count', 0)
-            
+        for r in records_ig:
+            # 1. Masukkan data Post utamanya dulu (hanya agar Post ter-record meski tidak ada komentar)
             dataset.append({
                 "Interaction_Type": "POST",
-                "Source_User": post_author,
-                "Target": post_id,
-                "Post_Link": permalink,
-                "User_Pembuat_Post": post_author,
-                "Post": post_caption,
-                "Tanggal_Upload": p.get('timestamp', ''),
-                "Jumlah_Like_Post": post_likes,
+                "Source_User": r["Post_Author"],
+                "Target": r["Target_Post_ID"],
+                "Post_Link": r["Permalink"],
+                "User_Pembuat_Post": r["Post_Author"],
+                "Post": r["Post_Content"],
+                "Tanggal_Upload": r["Upload_Date"],
+                "Jumlah_Like_Post": r["Post_Likes"],
                 "Jumlah_Views_Post": 0,
-                "Jumlah_Comment_Post": post_comments_count,
+                "Jumlah_Comment_Post": r["Post_Comments"],
                 "Jumlah_Share_Post": 0,
                 "Komentar": "",
                 "Balasan_Komentar": "",
                 "Jumlah_Like_Komentar": 0,
                 "Jumlah_Reply_Komentar": 0
             })
-            for act in p.get('interactions', []):
-                i_type = act.get('interaction_type', 'COMMENT')
-                content = act.get('content', '').replace('\n', ' ')
+            
+            # 2. Jika ada interaksi komentar, masukkan sebagai record komentar
+            if r["Comment_Author"] and r["Comment_Content"]:
                 dataset.append({
-                    "Interaction_Type": i_type,
-                    "Source_User": act.get('source_username', 'Unknown'),
-                    "Target": act.get('target_id', post_id),
-                    "Post_Link": permalink,
-                    "User_Pembuat_Post": post_author,
-                    "Post": post_caption,
-                    "Tanggal_Upload": act.get('timestamp', ''),
-                    "Jumlah_Like_Post": post_likes,
+                    "Interaction_Type": "COMMENT",
+                    "Source_User": r["Comment_Author"],
+                    "Target": r["Target_Post_ID"], # Targetnya adalah ID Post yang dikomentari
+                    "Post_Link": r["Permalink"],
+                    "User_Pembuat_Post": r["Post_Author"],
+                    "Post": r["Post_Content"],
+                    "Tanggal_Upload": r["Upload_Date"], # Sebaiknya tanggal komentar jika ada di DB, tapi tanggal post sbg fallback
+                    "Jumlah_Like_Post": r["Post_Likes"],
                     "Jumlah_Views_Post": 0,
-                    "Jumlah_Comment_Post": post_comments_count,
+                    "Jumlah_Comment_Post": r["Post_Comments"],
                     "Jumlah_Share_Post": 0,
-                    "Komentar": content if i_type == 'COMMENT' else "",
-                    "Balasan_Komentar": content if i_type == 'REPLY' else "",
-                    "Jumlah_Like_Komentar": act.get('likes', 0),
+                    "Komentar": r["Comment_Content"],
+                    "Balasan_Komentar": "",
+                    "Jumlah_Like_Komentar": r["Comment_Likes"],
                     "Jumlah_Reply_Komentar": 0
                 })
+
     else:
         raise HTTPException(status_code=400, detail="source_type harus 'app' atau 'instagram'")
 
