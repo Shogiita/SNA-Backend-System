@@ -19,29 +19,22 @@ class ExportPayload(BaseModel):
 class SheetsLinkPayload(ExportPayload):
     existing_sheet_url: str
 
-class SheetsSyncPayload(ExportPayload):
-    sheet_id: str
-
-#dipake
 @router.post("/export/csv")
 async def export_csv_endpoint(payload: ExportPayload):
     return await integration_controller.export_to_csv(
         payload.source, payload.start_date, payload.end_date, payload.selected_columns, payload.export_all
     )
 
-#dipake
 @router.post("/sheets/link")
 async def link_sheets_endpoint(payload: SheetsLinkPayload):
     return await integration_controller.link_to_sheets(
         payload.existing_sheet_url, payload.source, payload.start_date, payload.end_date, payload.selected_columns, payload.export_all
     )
 
-#dipake
 @router.get("/sheets/linked")
 async def get_linked_sheets_endpoint():
     return await integration_controller.get_all_linked_sheets()
 
-#dipake
 @router.delete("/sheets/unlink/{doc_id}")
 async def unlink_sheets_doc_endpoint(doc_id: str):
     return await integration_controller.unlink_sheets(doc_id)

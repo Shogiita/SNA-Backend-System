@@ -12,7 +12,6 @@ router = APIRouter(
 def get_stats():
     return report_controller.get_stats_summary()
 
-#dipake
 @router.get("/dashboard/top-content")
 def get_dashboard_top_content(
     source: str = Query("app", description="Pilih sumber data: 'app' atau 'instagram'"),
@@ -22,7 +21,6 @@ def get_dashboard_top_content(
     """Mengambil Top 10 Posts dan Top 10 Hashtags secara instan."""
     return report_controller.get_top_content_summary(source=source, start_date=start_date, end_date=end_date)
 
-#dipake
 @router.get("/dashboard/network-metrics")
 def get_dashboard_network_metrics(
     source: str = Query("app", description="Pilih sumber data: 'app' atau 'instagram'")
@@ -30,7 +28,6 @@ def get_dashboard_network_metrics(
     """Mengambil kalkulasi kompleks SNA (Centrality, Geodesic, Cliques)."""
     return report_controller.get_network_metrics_summary(source)
 
-#dipake
 @router.get("/dashboard/live-analytics") 
 def get_dashboard_live_analytics():
     """Mengambil data pengguna aktif real-time dari integrasi Google Analytics 4."""

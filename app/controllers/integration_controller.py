@@ -22,7 +22,6 @@ from app.config import GOOGLE_CREDENTIALS
 
 MASTER_SHEET_ID = "MASUKKAN_ID_SPREADSHEET_DISINI"
 
-#dipake
 def get_gspread_client():
     try:
         scopes = [
@@ -35,7 +34,7 @@ def get_gspread_client():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal otentikasi Google Sheets: {str(e)}")
 
-#dipake
+
 def get_master_dataframe(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True) -> pd.DataFrame:
     dataset = []
 
@@ -208,7 +207,6 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
 
     return df
 
-#dipake
 async def export_to_csv(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
     try:
         df = await asyncio.to_thread(get_master_dataframe, source_type, start_date, end_date, selected_columns, export_all)
@@ -224,7 +222,6 @@ async def export_to_csv(source_type: str, start_date: str = None, end_date: str 
         if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=str(e))
 
-#dipake
 async def link_to_sheets(existing_sheet_url: str, source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
     if not existing_sheet_url:
         raise HTTPException(status_code=400, detail="URL Spreadsheet wajib diisi.")
@@ -284,7 +281,6 @@ async def link_to_sheets(existing_sheet_url: str, source_type: str, start_date: 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-#dipake
 async def get_all_linked_sheets():
     try:
         docs = db.collection('linked_sheets').order_by('created_at', direction='DESCENDING').stream()
@@ -292,7 +288,6 @@ async def get_all_linked_sheets():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-#dipake
 async def unlink_sheets(doc_id: str):
     try:
         db.collection('linked_sheets').document(doc_id).delete()
