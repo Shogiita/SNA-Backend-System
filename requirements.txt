@@ -2,7 +2,6 @@ fastapi
 uvicorn[standard]
 networkx
 leidenalg
-igraph
 firebase-admin
 httpx
 python-dotenv
@@ -18,3 +17,6 @@ google-auth
 python-multipart
 google-analytics-data
 apscheduler
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2

@@ -16,12 +16,6 @@ from app import config
 print("check koneksi neo4j:", config.NEO4J_URI)
 
 from app.routers import (
-    csv_graph_router, 
-    user_router, 
-    post_router, 
-    graph_router, 
-    ss_graph_router, 
-    ml_router,
     auth_router,
     instagram_router,
     sna_router,
@@ -31,11 +25,8 @@ from app.routers import (
 )
 
 scheduler = BackgroundScheduler()
-
-# Menggantikan @app.on_event("startup") dan @app.on_event("shutdown")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- LOGIKA STARTUP ---
     scheduler.add_job(sync_instagram_to_neo4j, 'interval', hours=1, args=[False])
     scheduler.start()
 
@@ -44,9 +35,7 @@ async def lifespan(app: FastAPI):
     print("🚀 APScheduler berjalan: Auto-update IG-Neo4j setiap 1 jam.")
     print("🚀 APScheduler berjalan: Auto-hit GA4 Live Analytics setiap 2 menit.")
     
-    yield  # Menandakan aplikasi sedang berjalan melayani request
-    
-    # --- LOGIKA SHUTDOWN ---
+    yield 
     scheduler.shutdown()
     print("🛑 APScheduler dihentikan.")
 
@@ -58,12 +47,6 @@ app = FastAPI(
     lifespan=lifespan  # Mendaftarkan fungsi lifespan ke aplikasi
 )
 
-app.include_router(csv_graph_router.router)
-app.include_router(user_router.router)
-app.include_router(post_router.router)
-app.include_router(graph_router.router)
-app.include_router(ss_graph_router.router)
-app.include_router(ml_router.router)
 app.include_router(auth_router.router)
 app.include_router(instagram_router.router)
 app.include_router(sna_router.router)

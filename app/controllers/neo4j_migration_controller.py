@@ -2,6 +2,7 @@ import asyncio
 import json
 from app.database import db, neo4j_driver
 
+#done
 def check_neo4j_connection():
     try:
         neo4j_driver.verify_connectivity()
