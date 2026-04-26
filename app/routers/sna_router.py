@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Query, BackgroundTasks
 from app.controllers import sna_controller
+from app.controllers import neo4j_graph_controller
 
 router = APIRouter(
     prefix="/sna",
@@ -30,12 +31,53 @@ async def run_ingestion_endpoint(background_tasks: BackgroundTasks):
 def get_sna_dataset_endpoint():
     return sna_controller.get_dataset_flat()
 
-@router.get("/neo4j/analyze")
-async def analyze_neo4j_endpoint(
-    mode: int = Query(1, description="1 untuk 1-Mode (User-User), 2 untuk 2-Mode (User-Post)"),
-    limit: int = Query(1000, description="Limit nodes agar browser tidak freeze")
+
+@router.get("/snagraph/visualize")
+async def visualize_ss_graph_endpoint(
+    limit: int = Query(1000), 
+    mode: int = Query(1, description="1: User-User, 2: User-Post")
 ):
-    return await sna_controller.analyze_neo4j_network(mode=mode, limit=limit)
+    return await neo4j_graph_controller.visualize_graph_from_neo4j(limit=limit, mode=mode)
+
+@router.post("/neo4j/visualization/app")
+async def create_app_visualization_graph_endpoint(
+    limit: int = Query(5000),
+    mode: int = Query(2, description="1: User-User, 2: User-Post"),
+    max_edges: int = Query(25000)
+):
+    return await neo4j_graph_controller.create_graph_visualization_from_neo4j(
+        limit=limit,
+        mode=mode,
+        max_edges=max_edges
+    )
+
+
+@router.post("/neo4j/visualization/instagram")
+async def create_instagram_visualization_graph_endpoint(
+    limit: int = Query(5000),
+    mode: int = Query(2, description="1: User-User, 2: User-Post-Comment-Hashtag"),
+    max_edges: int = Query(25000)
+):
+    return await sna_controller.create_instagram_graph_visualization_from_neo4j(
+        limit=limit,
+        mode=mode,
+        max_edges=max_edges
+    )
+
+# @router.post("/neo4j/analyze/app")
+# async def create_ss_graph_endpoint(limit: int = Query(1000), mode: int = Query(1, description="1: User-User, 2: User-Post")):
+#     return await neo4j_graph_controller.create_graph_from_neo4j(limit=limit, mode=mode)
+
+
+# @router.post("/neo4j/analyze/instagram")
+# async def analyze_instagram_graph_endpoint(
+#     limit: int = Query(1000),
+#     mode: int = Query(1, description="1: User-User, 2: User-Post-Comment-Hashtag")
+# ):
+#     return await sna_controller.analyze_instagram_graph_from_neo4j(
+#         limit=limit,
+#         mode=mode
+#     )
 
 @router.get("/neo4j/visualize")
 async def visualize_neo4j_endpoint(

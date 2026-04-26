@@ -3,26 +3,26 @@ import json
 import os
 import asyncio
 import tempfile
+import datetime
+
 import pandas as pd
 import networkx as nx
-import leidenalg as la
-import igraph as ig
 import gspread
-import datetime
+
 from google.oauth2.service_account import Credentials
 from fastapi import HTTPException, Response, UploadFile
-from fastapi.responses import StreamingResponse, FileResponse 
+from fastapi.responses import StreamingResponse, FileResponse
+
 from app.database import neo4j_driver, db
 from app import config
+from app.config import GOOGLE_CREDENTIALS
+from app.utils.leiden_utils import apply_leiden_communities
 
-# Import dictionary GOOGLE_CREDENTIALS dari config.py
 from app.config import GOOGLE_CREDENTIALS
 
-# =================================================================
-# MASUKKAN ID SPREADSHEET DARI TAHAP 1 DI SINI
-# =================================================================
 MASTER_SHEET_ID = "MASUKKAN_ID_SPREADSHEET_DISINI"
 
+#dipake
 def get_gspread_client():
     try:
         scopes = [
@@ -35,6 +35,7 @@ def get_gspread_client():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal otentikasi Google Sheets: {str(e)}")
 
+#dipake
 def get_master_dataframe(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True) -> pd.DataFrame:
     dataset = []
 
@@ -207,6 +208,7 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
 
     return df
 
+#dipake
 async def export_to_csv(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
     try:
         df = await asyncio.to_thread(get_master_dataframe, source_type, start_date, end_date, selected_columns, export_all)
@@ -222,9 +224,7 @@ async def export_to_csv(source_type: str, start_date: str = None, end_date: str 
         if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=str(e))
 
-# =====================================================================
-# SPREADSHEET LINKING (BINDING MULTIPLE SPREADSHEETS)
-# =====================================================================
+#dipake
 async def link_to_sheets(existing_sheet_url: str, source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
     if not existing_sheet_url:
         raise HTTPException(status_code=400, detail="URL Spreadsheet wajib diisi.")
@@ -284,6 +284,7 @@ async def link_to_sheets(existing_sheet_url: str, source_type: str, start_date: 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+#dipake
 async def get_all_linked_sheets():
     try:
         docs = db.collection('linked_sheets').order_by('created_at', direction='DESCENDING').stream()
@@ -291,86 +292,10 @@ async def get_all_linked_sheets():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-async def sync_to_sheets(sheet_id: str, source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
-    try:
-        df = await asyncio.to_thread(get_master_dataframe, source_type, start_date, end_date, selected_columns, export_all)
-        def _sync():
-            gc = get_gspread_client()
-            sh = gc.open_by_key(MASTER_SHEET_ID)
-            tab_name = "DATA_APP" if source_type == 'app' else "DATA_IG"
-            ws = sh.worksheet(tab_name)
-            ws.clear()
-            if not df.empty:
-                safe_df = df.fillna("").astype(str)
-                ws.update([safe_df.columns.tolist()] + safe_df.values.tolist())
-        await asyncio.to_thread(_sync)
-        return {"status": "success", "message": "Sinkronisasi berhasil!"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+#dipake
 async def unlink_sheets(doc_id: str):
     try:
         db.collection('linked_sheets').document(doc_id).delete()
         return {"status": "success", "message": "Tautan dihapus dari Dashboard."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-async def unlink_all_sheets():
-    try:
-        docs = db.collection('linked_sheets').stream()
-        for doc in docs: db.collection('linked_sheets').document(doc.id).delete()
-        return {"status": "success", "message": "Semua tautan dihapus."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-def _calculate_graph_from_dataframe(df: pd.DataFrame):
-    G = nx.DiGraph()
-    for _, row in df.iterrows():
-        source = str(row.get('Source_User', '')).strip()
-        target = str(row.get('Target', '')).strip()
-        i_type = str(row.get('Interaction_Type', 'POST')).upper()
-        if not source or source == 'nan': continue
-        s_node = f"user_{source}"
-        if not G.has_node(s_node): G.add_node(s_node, type="user", label=source)
-        if i_type == 'POST':
-            t_node = f"post_{target}"
-            if not G.has_node(t_node): G.add_node(t_node, type="post", label=str(row.get('Post', ''))[:20])
-            G.add_edge(s_node, t_node, weight=5, type="AUTHORED")
-        elif i_type in ['COMMENT', 'REPLY']:
-            t_node = f"post_{target}" if i_type == 'COMMENT' else f"user_{target}"
-            if not G.has_node(t_node): G.add_node(t_node, type="post" if i_type == 'COMMENT' else "user", label=target)
-            if G.has_edge(s_node, t_node): G[s_node][t_node]['weight'] += 3
-            else: G.add_edge(s_node, t_node, weight=3, type=i_type)
-
-    G.remove_nodes_from(list(nx.isolates(G)))
-    if G.number_of_nodes() == 0: raise HTTPException(status_code=400, detail="Data kosong.")
-    for u, v, d in G.edges(data=True): d['distance'] = 1.0 / d['weight'] if d.get('weight', 1) > 0 else 1.0
-    deg_cent = nx.degree_centrality(G)
-    bet_cent = nx.betweenness_centrality(G, weight='distance')
-    clo_cent = nx.closeness_centrality(G, distance='distance')
-    try: eig_cent = nx.eigenvector_centrality(G, weight='weight', max_iter=1000)
-    except: eig_cent = {n: 0.0 for n in G.nodes()}
-
-    ig_G = ig.Graph.TupleList(G.edges(), directed=True)
-    partition = la.find_partition(ig_G, la.ModularityVertexPartition, n_iterations=-1)
-    comm_map = {ig_G.vs[node.index]['name']: c_id for c_id, members in enumerate(partition) for node in members}
-
-    nodes_out = [{"id": n, "label": G.nodes[n].get('label', n), "attributes": {"community": comm_map.get(n, 0)}, "metrics": {"degree": deg_cent.get(n, 0.0), "betweenness": bet_cent.get(n, 0.0), "closeness": clo_cent.get(n, 0.0), "eigenvector": eig_cent.get(n, 0.0)}} for n in G.nodes()]
-    return {"meta": {"total_nodes": G.number_of_nodes(), "total_edges": G.number_of_edges()}, "graph_data": {"nodes": nodes_out, "edges": [{"source": u, "target": v, "weight": d.get('weight', 1)} for u, v, d in G.edges(data=True)]}}
-
-async def import_from_excel(file: UploadFile):
-    try:
-        content = await file.read()
-        df = await asyncio.to_thread(pd.read_excel, io.BytesIO(content))
-        return await asyncio.to_thread(_calculate_graph_from_dataframe, df)
-    except Exception as e: raise HTTPException(status_code=400, detail=str(e))
-
-async def import_from_sheets(sheet_id: str):
-    try:
-        def _fetch_sheet():
-            gc = get_gspread_client()
-            sh = gc.open_by_key(sheet_id)
-            return sh.get_worksheet(0).get_all_records()
-        df = pd.DataFrame(await asyncio.to_thread(_fetch_sheet))
-        return await asyncio.to_thread(_calculate_graph_from_dataframe, df)
-    except Exception as e: raise HTTPException(status_code=400, detail=str(e))

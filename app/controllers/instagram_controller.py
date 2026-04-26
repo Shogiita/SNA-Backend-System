@@ -3,6 +3,7 @@ from fastapi import HTTPException, status
 from typing import Dict, Any, Optional
 from app import config
 
+#done
 async def _check_config() -> None:
     """Helper untuk memvalidasi konfigurasi sebelum membuat panggilan API."""
     if not config.IG_BUSINESS_ACCOUNT_ID:
@@ -20,11 +21,9 @@ async def _make_ig_api_request(endpoint: str, params: Optional[Dict[str, Any]] =
     """Fungsi helper untuk melakukan panggilan ke Instagram Graph API."""
     await _check_config()
     
-    # Menghindari mutable default argument
     if params is None:
         params = {}
         
-    # Menghapus slash di awal endpoint untuk mencegah double slash (//) pada URL
     clean_endpoint = endpoint.lstrip("/")
     base_url = f"{config.GRAPH_API_URL}/{clean_endpoint}"
     
@@ -61,15 +60,6 @@ async def get_user_profile() -> Dict[str, Any]:
     endpoint = f"{config.IG_BUSINESS_ACCOUNT_ID}"
     params = {
         "fields": "id,username,name,biography,followers_count,follows_count,media_count,profile_picture_url"
-    }
-    return await _make_ig_api_request(endpoint, params)
-
-async def get_user_media(limit: int = 10) -> Dict[str, Any]:
-    """Mengambil daftar media/postingan dari Instagram."""
-    endpoint = f"{config.IG_BUSINESS_ACCOUNT_ID}/media"
-    params = {
-        "fields": "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count,username",
-        "limit": limit
     }
     return await _make_ig_api_request(endpoint, params)
 
