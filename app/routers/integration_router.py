@@ -1,40 +1,57 @@
-from fastapi import APIRouter, Query, UploadFile, File
-from pydantic import BaseModel
-from typing import List, Optional
-from app.controllers import integration_controller
+from fastapi import APIRouter, BackgroundTasks, Query
+from app.controllers import neo4j_migration_controller
 
 router = APIRouter(
-    prefix="/integration",
-    tags=["CSV & Sheets Integration"]
+    prefix="/neo4j",
+    tags=["Neo4j Migration"]
 )
 
-class ExportPayload(BaseModel):
-    source: str 
-    export_all: bool = True
-    selected_columns: List[str] = []
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
 
-# Menerima URL Spreadsheet langsung dari user
-class SheetsLinkPayload(ExportPayload):
-    existing_sheet_url: str
+@router.post("/migrate")
+async def start_migration_background(
+    background_tasks: BackgroundTasks,
+    force_full: bool = Query(
+        False,
+        description="Set True jika ingin migrasi ulang semua data. Default False = hanya migrasi data baru/berubah."
+    )
+):
+    """
+    Menjalankan proses migrasi data dari Firebase ke Neo4j di background.
 
-@router.post("/export/csv")
-async def export_csv_endpoint(payload: ExportPayload):
-    return await integration_controller.export_to_csv(
-        payload.source, payload.start_date, payload.end_date, payload.selected_columns, payload.export_all
+    Default:
+    - incremental migration
+    - tidak menghapus data lama
+    - tidak membuat data double
+    """
+    started = neo4j_migration_controller.start_migration(
+        background_tasks=background_tasks,
+        force_full=force_full
     )
 
-@router.post("/sheets/link")
-async def link_sheets_endpoint(payload: SheetsLinkPayload):
-    return await integration_controller.link_to_sheets(
-        payload.existing_sheet_url, payload.source, payload.start_date, payload.end_date, payload.selected_columns, payload.export_all
-    )
+    if not started:
+        return {
+            "status": "running",
+            "message": "Proses migrasi masih berjalan. Tunggu sampai selesai sebelum menjalankan migrasi baru."
+        }
 
-@router.get("/sheets/linked")
-async def get_linked_sheets_endpoint():
-    return await integration_controller.get_all_linked_sheets()
+    return {
+        "status": "success",
+        "mode": "full" if force_full else "incremental",
+        "message": "Proses migrasi Firebase ke Neo4j sedang berjalan di background. Silakan cek /neo4j/migrate/status."
+    }
 
-@router.delete("/sheets/unlink/{doc_id}")
-async def unlink_sheets_doc_endpoint(doc_id: str):
-    return await integration_controller.unlink_sheets(doc_id)
+
+@router.get("/migrate/status")
+async def get_migration_status():
+    """
+    Melihat status migrasi Firebase ke Neo4j.
+    """
+    return neo4j_migration_controller.get_migration_status()
+
+
+@router.delete("/clear-all")
+async def clear_all_neo4j_data():
+    """
+    Menghapus semua data Neo4j dan reset metadata migrasi.
+    """
+    return await neo4j_migration_controller.delete_all_neo4j_data()
