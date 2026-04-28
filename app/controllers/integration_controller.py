@@ -35,8 +35,16 @@ def get_gspread_client():
         raise HTTPException(status_code=500, detail=f"Gagal otentikasi Google Sheets: {str(e)}")
 
 
-def get_master_dataframe(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True) -> pd.DataFrame:
+def get_master_dataframe(
+    source_type: str,
+    start_date: str = None,
+    end_date: str = None,
+    selected_columns: list = None,
+    export_all: bool = True
+) -> pd.DataFrame:
     dataset = []
+
+    community_map = {}
 
     if source_type == 'app':
         query = """
@@ -44,6 +52,7 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
         WHERE (p:FirebaseKawanSS OR p:FirebaseInfoss) AND (p.isDeleted = false OR p.isDeleted IS NULL)
         OPTIONAL MATCH (c_author:FirebaseUser)-[:WROTE_FB]->(c)-[:COMMENTED_ON_FB]->(p)
         RETURN 
+            coalesce(author.id, author.username, author.nama) AS Post_Author_ID,
             coalesce(author.username, author.nama, author.id) AS Post_Author,
             coalesce(p.judul, p.title, p.deskripsi, 'No Content') AS Post_Content,
             coalesce(p.createdAt, p.uploadDate, '') AS Upload_Date,
@@ -51,21 +60,55 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
             coalesce(toInteger(p.jumlahView), 0) AS Post_Views,
             coalesce(toInteger(p.jumlahComment), 0) AS Post_Comments,
             coalesce(toInteger(p.jumlahShare), 0) AS Post_Shares,
+            coalesce(c_author.id, c_author.username, c_author.nama) AS Comment_Author_ID,
             coalesce(c_author.username, c_author.nama, c_author.id) AS Comment_Author,
             coalesce(c.text, c.komentar, '') AS Comment_Content,
             coalesce(toInteger(c.likes), 0) AS Comment_Likes,
             0 AS Comment_Replies_Count,
             p.id AS Target_Post_ID
         """
+
         try:
             with neo4j_driver.session() as session:
                 records = session.run(query).data()
         except Exception as db_err:
-            raise HTTPException(status_code=500, detail=f"Koneksi Neo4j terputus: {str(db_err)}")
-            
+            raise HTTPException(
+                status_code=500,
+                detail=f"Koneksi Neo4j terputus: {str(db_err)}"
+            )
+
+        G = nx.Graph()
+
         for r in records:
+            post_author_id = str(r.get("Post_Author_ID") or r.get("Post_Author") or "").strip()
+            comment_author_id = str(r.get("Comment_Author_ID") or r.get("Comment_Author") or "").strip()
+            target_post_id = str(r.get("Target_Post_ID") or "").strip()
+
+            post_node = f"post_{target_post_id}" if target_post_id else ""
+            author_node = f"user_{post_author_id}" if post_author_id else ""
+            comment_author_node = f"user_{comment_author_id}" if comment_author_id else ""
+
+            if author_node and post_node:
+                G.add_edge(author_node, post_node, weight=5)
+
+            if comment_author_node and post_node:
+                G.add_edge(comment_author_node, post_node, weight=3)
+
+        if G.number_of_nodes() > 0:
+            community_map = apply_leiden_communities(G, weight_attr="weight")
+
+        for r in records:
+            post_author_id = str(r.get("Post_Author_ID") or r.get("Post_Author") or "").strip()
+            comment_author_id = str(r.get("Comment_Author_ID") or r.get("Comment_Author") or "").strip()
+            target_post_id = str(r.get("Target_Post_ID") or "").strip()
+
+            post_author_node = f"user_{post_author_id}" if post_author_id else ""
+            comment_author_node = f"user_{comment_author_id}" if comment_author_id else ""
+            post_node = f"post_{target_post_id}" if target_post_id else ""
+
             dataset.append({
                 "Interaction_Type": "POST",
+                "Community": community_map.get(post_author_node, community_map.get(post_node, "")),
                 "Source_User": r["Post_Author"],
                 "Target": r["Target_Post_ID"],
                 "Post_Link": "",
@@ -81,9 +124,11 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
                 "Jumlah_Like_Komentar": 0,
                 "Jumlah_Reply_Komentar": 0
             })
+
             if r["Comment_Author"] and r["Comment_Content"]:
                 dataset.append({
                     "Interaction_Type": "COMMENT",
+                    "Community": community_map.get(comment_author_node, community_map.get(post_node, "")),
                     "Source_User": r["Comment_Author"],
                     "Target": r["Target_Post_ID"],
                     "Post_Link": "",
@@ -101,10 +146,9 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
                 })
 
     elif source_type == 'instagram':
-        # PERUBAHAN UTAMA: Mengambil data Instagram langsung dari Neo4j (bukan file cache.json)
         query_ig = """
         MATCH (author:InstagramUser)-[:POSTED_IG]->(p:InstagramPost)
-        OPTIONAL MATCH (c_author:InstagramUser)-[:COMMENTED_IG]->(c:InstagramComment)-[:ON_POST_IG]->(p)
+        OPTIONAL MATCH (c_author:InstagramUser)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p)
         RETURN 
             coalesce(author.username, 'Suara_Surabaya_Official') AS Post_Author,
             coalesce(p.caption, 'No Content') AS Post_Content,
@@ -114,23 +158,57 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
             coalesce(toInteger(p.comments_count), 0) AS Post_Comments,
             coalesce(c_author.username, '') AS Comment_Author,
             coalesce(c.text, '') AS Comment_Content,
-            coalesce(toInteger(c.like_count), 0) AS Comment_Likes,
+            coalesce(toInteger(c.likes), 0) AS Comment_Likes,
             p.id AS Target_Post_ID
         """
-        
+
         try:
             with neo4j_driver.session() as session:
                 records_ig = session.run(query_ig).data()
         except Exception as db_err:
-            raise HTTPException(status_code=500, detail=f"Koneksi Neo4j terputus saat mengambil data Instagram: {str(db_err)}")
-            
+            raise HTTPException(
+                status_code=500,
+                detail=f"Koneksi Neo4j terputus saat mengambil data Instagram: {str(db_err)}"
+            )
+
         if not records_ig:
-            raise HTTPException(status_code=404, detail="Data Instagram kosong di database Neo4j. Pastikan scheduler sinkronisasi sudah berjalan.")
-            
+            raise HTTPException(
+                status_code=404,
+                detail="Data Instagram kosong di database Neo4j. Pastikan scheduler sinkronisasi sudah berjalan."
+            )
+
+        G = nx.Graph()
+
         for r in records_ig:
-            # 1. Masukkan data Post utamanya dulu (hanya agar Post ter-record meski tidak ada komentar)
+            post_author = str(r.get("Post_Author") or "").strip()
+            comment_author = str(r.get("Comment_Author") or "").strip()
+            target_post_id = str(r.get("Target_Post_ID") or "").strip()
+
+            post_node = f"post_{target_post_id}" if target_post_id else ""
+            author_node = f"user_{post_author}" if post_author else ""
+            comment_author_node = f"user_{comment_author}" if comment_author else ""
+
+            if author_node and post_node:
+                G.add_edge(author_node, post_node, weight=5)
+
+            if comment_author_node and post_node:
+                G.add_edge(comment_author_node, post_node, weight=3)
+
+        if G.number_of_nodes() > 0:
+            community_map = apply_leiden_communities(G, weight_attr="weight")
+
+        for r in records_ig:
+            post_author = str(r.get("Post_Author") or "").strip()
+            comment_author = str(r.get("Comment_Author") or "").strip()
+            target_post_id = str(r.get("Target_Post_ID") or "").strip()
+
+            post_author_node = f"user_{post_author}" if post_author else ""
+            comment_author_node = f"user_{comment_author}" if comment_author else ""
+            post_node = f"post_{target_post_id}" if target_post_id else ""
+
             dataset.append({
                 "Interaction_Type": "POST",
+                "Community": community_map.get(post_author_node, community_map.get(post_node, "")),
                 "Source_User": r["Post_Author"],
                 "Target": r["Target_Post_ID"],
                 "Post_Link": r["Permalink"],
@@ -146,17 +224,17 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
                 "Jumlah_Like_Komentar": 0,
                 "Jumlah_Reply_Komentar": 0
             })
-            
-            # 2. Jika ada interaksi komentar, masukkan sebagai record komentar
+
             if r["Comment_Author"] and r["Comment_Content"]:
                 dataset.append({
                     "Interaction_Type": "COMMENT",
+                    "Community": community_map.get(comment_author_node, community_map.get(post_node, "")),
                     "Source_User": r["Comment_Author"],
-                    "Target": r["Target_Post_ID"], # Targetnya adalah ID Post yang dikomentari
+                    "Target": r["Target_Post_ID"],
                     "Post_Link": r["Permalink"],
                     "User_Pembuat_Post": r["Post_Author"],
                     "Post": r["Post_Content"],
-                    "Tanggal_Upload": r["Upload_Date"], # Sebaiknya tanggal komentar jika ada di DB, tapi tanggal post sbg fallback
+                    "Tanggal_Upload": r["Upload_Date"],
                     "Jumlah_Like_Post": r["Post_Likes"],
                     "Jumlah_Views_Post": 0,
                     "Jumlah_Comment_Post": r["Post_Comments"],
@@ -168,45 +246,74 @@ def get_master_dataframe(source_type: str, start_date: str = None, end_date: str
                 })
 
     else:
-        raise HTTPException(status_code=400, detail="source_type harus 'app' atau 'instagram'")
+        raise HTTPException(
+            status_code=400,
+            detail="source_type harus 'app' atau 'instagram'"
+        )
 
     df = pd.DataFrame(dataset).drop_duplicates()
-    if df.empty: return df
+
+    if df.empty:
+        return df
 
     def parse_to_datetime(val):
-        if pd.isna(val) or str(val).strip() == "": return pd.NaT
+        if pd.isna(val) or str(val).strip() == "":
+            return pd.NaT
+
         try:
             if isinstance(val, str) and 'T' in val:
                 dt = pd.to_datetime(val)
-                if dt.tzinfo is not None: dt = dt.tz_localize(None) 
+
+                if dt.tzinfo is not None:
+                    dt = dt.tz_localize(None)
+
                 return dt
+
             val_num = float(val)
             return pd.to_datetime(val_num, unit='ms') if val_num > 1e11 else pd.to_datetime(val_num, unit='s')
-        except: return pd.NaT
+        except Exception:
+            return pd.NaT
 
     df['Datetime_Obj'] = df['Tanggal_Upload'].apply(parse_to_datetime)
 
     if start_date:
         try:
             df = df[df['Datetime_Obj'] >= pd.to_datetime(start_date)]
-        except: pass
+        except Exception:
+            pass
+
     if end_date:
         try:
             df = df[df['Datetime_Obj'] <= (pd.to_datetime(end_date) + pd.Timedelta(days=1, seconds=-1))]
-        except: pass
+        except Exception:
+            pass
 
-    df['Tanggal_Upload'] = df['Datetime_Obj'].apply(lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notnull(x) else "")
+    df['Tanggal_Upload'] = df['Datetime_Obj'].apply(
+        lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notnull(x) else ""
+    )
+
     df = df.drop(columns=['Datetime_Obj'])
 
     if not export_all and selected_columns is not None:
-        mandatory = ['Interaction_Type', 'Source_User', 'Target', 'Post_Link', 'Post']
+        mandatory = [
+            'Interaction_Type',
+            'Community',
+            'Source_User',
+            'Target',
+            'Post_Link',
+            'Post'
+        ]
+
         final_cols = [c for c in mandatory if c in df.columns]
+
         for c in selected_columns:
-            if c in df.columns and c not in final_cols: final_cols.append(c)
+            if c in df.columns and c not in final_cols:
+                final_cols.append(c)
+
         df = df[final_cols]
 
     return df
-
+    
 async def export_to_csv(source_type: str, start_date: str = None, end_date: str = None, selected_columns: list = None, export_all: bool = True):
     try:
         df = await asyncio.to_thread(get_master_dataframe, source_type, start_date, end_date, selected_columns, export_all)

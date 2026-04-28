@@ -25,7 +25,6 @@ def get_dashboard_top_content(
 def get_dashboard_network_metrics(
     source: str = Query("app", description="Pilih sumber data: 'app' atau 'instagram'")
 ):
-    """Mengambil kalkulasi kompleks SNA (Centrality, Geodesic, Cliques)."""
     return report_controller.get_network_metrics_summary(source)
 
 @router.get("/dashboard/live-analytics") 
