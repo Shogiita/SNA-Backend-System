@@ -91,7 +91,7 @@ async def create_instagram_graph_visualization_from_neo4j(
 
         H = H.subgraph(edge_node_ids).copy()
 
-        apply_leiden_communities(H, weight_attr="weight")
+        community_map = apply_leiden_communities(H, weight_attr="weight")
 
         degree_map = dict(H.degree(weight="weight"))
         max_degree = max(degree_map.values()) if degree_map else 1
@@ -100,10 +100,14 @@ async def create_instagram_graph_visualization_from_neo4j(
 
         for node in H.nodes():
             attr = H.nodes[node].copy()
+            community_id = community_map.get(node, attr.get("community", 0))
+            attr["community"] = community_id
+
             degree = degree_map.get(node, 0)
 
             nodes_output.append({
                 "id": node,
+                "community": community_id,
                 "attributes": attr,
                 "metrics": {
                     "degree": degree / max_degree if max_degree else 0.0,
@@ -140,6 +144,7 @@ async def create_instagram_graph_visualization_from_neo4j(
             "graph_info": {
                 "nodes_count": len(nodes_output),
                 "edges_count": len(edges_output),
+                "communities_count": len(set(community_map.values())),
                 "nodes": nodes_output,
                 "edges": edges_output
             }
@@ -149,6 +154,7 @@ async def create_instagram_graph_visualization_from_neo4j(
         if isinstance(e, HTTPException):
             raise e
 
+        import traceback
         traceback.print_exc()
 
         raise HTTPException(
@@ -468,14 +474,20 @@ async def analyze_instagram_graph_from_neo4j(limit: int = 1000, mode: int = 1):
                 detail="Tidak ada relasi data Instagram yang ditemukan di Neo4j.",
             )
 
+        community_map = apply_leiden_communities(G, weight_attr="weight")
         centrality = calculate_centrality(G)
 
         nodes_output = []
 
         for node in G.nodes():
+            attr = G.nodes[node].copy()
+            community_id = community_map.get(node, attr.get("community", 0))
+            attr["community"] = community_id
+
             nodes_output.append({
                 "id": node,
-                "attributes": G.nodes[node],
+                "community": community_id,
+                "attributes": attr,
                 "metrics": {
                     "degree": centrality["degree"].get(node, 0.0),
                     "in_degree": centrality["in_degree"].get(node, 0.0),
@@ -505,6 +517,7 @@ async def analyze_instagram_graph_from_neo4j(limit: int = 1000, mode: int = 1):
             "graph_info": {
                 "nodes_count": G.number_of_nodes(),
                 "edges_count": G.number_of_edges(),
+                "communities_count": len(set(community_map.values())),
                 "nodes": nodes_output,
                 "edges": edges_output,
             },
@@ -514,13 +527,13 @@ async def analyze_instagram_graph_from_neo4j(limit: int = 1000, mode: int = 1):
         if isinstance(e, HTTPException):
             raise e
 
+        import traceback
         traceback.print_exc()
 
         raise HTTPException(
             status_code=500,
             detail=f"Gagal memproses graf Instagram Neo4j: {str(e)}",
         )
-
 
 def _process_ig_to_neo4j_batch(posts_batch, comments_batch):
     post_query = """
@@ -1284,6 +1297,7 @@ def visualize_instagram_graph_from_neo4j(limit: int = 1000, mode: int = 1):
                 "<h1>Graf Kosong</h1><p>Belum ada data relasi Instagram di Neo4j.</p>"
             )
 
+        community_map = apply_leiden_communities(G, weight_attr="weight")
         degree_centrality = nx.degree_centrality(G)
 
         net = Network(
@@ -1295,7 +1309,9 @@ def visualize_instagram_graph_from_neo4j(limit: int = 1000, mode: int = 1):
         )
 
         for node, data in G.nodes(data=True):
-            group = data.get("community", 0)
+            community_id = community_map.get(node, data.get("community", 0))
+            data["community"] = community_id
+
             score = degree_centrality.get(node, 0)
             size = 15 + (score * 60)
 
@@ -1319,7 +1335,13 @@ def visualize_instagram_graph_from_neo4j(limit: int = 1000, mode: int = 1):
                 color = "#9C33FF"
 
             label = data.get("label") or str(node)
-            title_html = f"<b>{str(node_type).upper()}:</b> {label}<br><b>Cluster:</b> {group}"
+
+            title_html = (
+                f"<b>{str(node_type).upper()}:</b> {label}"
+                f"<br><b>Node ID:</b> {node}"
+                f"<br><b>Leiden Community:</b> {community_id}"
+                f"<br><b>Degree Centrality:</b> {score:.4f}"
+            )
 
             if "likes" in data:
                 title_html += f"<br><b>Total Likes:</b> {data['likes']}"
@@ -1328,7 +1350,7 @@ def visualize_instagram_graph_from_neo4j(limit: int = 1000, mode: int = 1):
                 node,
                 label=str(label)[:15],
                 title=title_html,
-                group=group,
+                group=community_id,
                 size=size,
                 shape=shape,
                 color=color,
@@ -1342,7 +1364,10 @@ def visualize_instagram_graph_from_neo4j(limit: int = 1000, mode: int = 1):
                 source,
                 target,
                 value=weight,
-                title=f"Relasi: {relation}<br>Bobot Total: {weight}",
+                title=(
+                    f"Relasi: {relation}"
+                    f"<br>Bobot Total: {weight}"
+                )
             )
 
         net.toggle_physics(True)
@@ -1363,9 +1388,8 @@ def visualize_instagram_graph_from_neo4j(limit: int = 1000, mode: int = 1):
 
         raise HTTPException(
             status_code=500,
-            detail=f"Gagal memvisualisasikan graf Instagram: {str(e)}",
+            detail=f"Gagal memvisualisasikan graf Instagram dengan Leiden Algorithm: {str(e)}",
         )
-
 
 _scheduler = BackgroundScheduler()
 
