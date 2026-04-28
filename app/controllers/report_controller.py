@@ -20,12 +20,31 @@ from google.analytics.data_v1beta.types import Dimension, Metric, RunRealtimeRep
 from google.oauth2 import service_account
 from app import config
 from app.utils.sna_filter_utils import is_ignored_app_user, is_ignored_instagram_user, normalize_hashtag, is_ignored_hashtag
+from google.analytics.data_v1beta.types import (
+    RunRealtimeReportRequest, 
+    Metric, 
+    FilterExpression, 
+    Filter
+)
+
+def get_ga_credentials():
+    return service_account.Credentials.from_service_account_info({
+        "type": os.getenv("GCP_TYPE"),
+        "project_id": os.getenv("GCP_PROJECT_ID"),
+        "private_key_id": os.getenv("GCP_PRIVATE_KEY_ID"),
+        "private_key": os.getenv("GCP_PRIVATE_KEY", "").replace('\\n', '\n'),
+        "client_email": os.getenv("GCP_CLIENT_EMAIL"),
+        "client_id": os.getenv("GCP_CLIENT_ID"),
+        "auth_uri": os.getenv("GCP_AUTH_URI"),
+        "token_uri": os.getenv("GCP_TOKEN_URI"),
+        "auth_provider_x509_cert_url": os.getenv("GCP_AUTH_PROVIDER_CERT_URL"),
+        "client_x509_cert_url": os.getenv("GCP_CLIENT_CERT_URL")
+    })
 
 def get_first_day_of_last_month(dt):
     first_day_of_current_month = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     last_day_of_last_month = first_day_of_current_month - timedelta(days=1)
     return last_day_of_last_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
 
 def get_top_content_summary(source: str = "app", start_date: str = None, end_date: str = None):
     try:
@@ -743,15 +762,55 @@ def get_network_metrics_summary(source: str = "app"):
 
 def get_live_analytics_summary():
     try:
-        active_users_data = {"last_30_min": 0, "last_5_min": 0} 
+        property_id = os.getenv("GA_PROPERTY_ID")
+        
+        if not property_id:
+            raise ValueError("GA_PROPERTY_ID tidak ditemukan di environment variables.")
+
+        credentials = get_ga_credentials()
+        client = BetaAnalyticsDataClient(credentials=credentials)
+
+        request_30 = RunRealtimeReportRequest(
+            property=f"properties/{property_id}",
+            metrics=[Metric(name="activeUsers")]
+        )
+        response_30 = client.run_realtime_report(request_30)
+
+        active_users_30_min = 0
+        if response_30.rows:
+            active_users_30_min = int(response_30.rows[0].metric_values[0].value)
+
+        request_5 = RunRealtimeReportRequest(
+            property=f"properties/{property_id}",
+            metrics=[Metric(name="activeUsers")],
+            dimension_filter=FilterExpression(
+                filter=Filter(
+                    field_name="minutesAgo",
+                    in_list_filter=Filter.InListFilter(
+                        # Filter data untuk 0, 1, 2, 3, dan 4 menit yang lalu
+                        values=["00", "01", "02", "03", "04"] 
+                    )
+                )
+            )
+        )
+        response_5 = client.run_realtime_report(request_5)
+
+        active_users_5_min = 0
+        if response_5.rows:
+            active_users_5_min = int(response_5.rows[0].metric_values[0].value)
+
+        # Konversi ke string atau kembalikan "Tidak ada" sesuai instruksi
+        val_30_min = str(active_users_30_min) if active_users_30_min > 0 else "Tidak ada"
+        val_5_min = str(active_users_5_min) if active_users_5_min > 0 else "Tidak ada"
+
         return {
             "status": "success",
             "data": {
                 "integrations": {
                     "google_analytics": {
-                        "status": "connected" if config.GA_PROPERTY_ID else "disconnected", 
-                        "active_users_last_30_min": active_users_data["last_30_min"],
-                        "active_users_last_5_min": active_users_data["last_5_min"]
+                        "status": "connected",
+                        "active_users_last_30_min": val_30_min,
+                        "active_users_last_5_min": val_5_min
                     }
                 }
             }
