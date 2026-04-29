@@ -73,7 +73,6 @@ def env_first(keys: Iterable[str], default: Optional[str] = None) -> Optional[st
 def load_checkpoint(checkpoint_path: Path) -> Optional[Dict[str, Any]]:
     if not checkpoint_path.exists():
         return None
-
     try:
         with checkpoint_path.open("r", encoding="utf-8") as file:
             return json.load(file)
@@ -90,10 +89,35 @@ def save_checkpoint(checkpoint_path: Path, payload: Dict[str, Any]) -> None:
     temp_path.replace(checkpoint_path)
 
 
-def delete_checkpoint(checkpoint_path: Path) -> None:
-    if checkpoint_path.exists():
-        checkpoint_path.unlink()
-        log(f"Checkpoint dihapus karena fetch posts sudah selesai: {checkpoint_path}")
+def delete_file(path: Path, label: str) -> None:
+    if path.exists():
+        path.unlink()
+        log(f"{label} dihapus: {path}")
+
+
+def append_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as file:
+        for row in rows:
+            file.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+
+
+def read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows = []
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+    return rows
 
 
 def iso_to_datetime(value: Optional[str]) -> Optional[datetime]:
@@ -148,79 +172,155 @@ def request_json(url: str, params: Optional[Dict[str, Any]] = None, retries: int
         except Exception as exc:
             last_error = exc
             if attempt < retries - 1:
-                log(f"Request gagal, retry {attempt + 2}/{retries}: {exc}")
+                log(f"Request gagal, retry {attempt + 2}/3: {exc}")
                 time.sleep(2 * (attempt + 1))
             else:
                 break
     raise InstagramApiError(str(last_error))
 
 
-def paginate(
+def batch_date_range(batch: List[Dict[str, Any]]) -> Tuple[Optional[datetime], Optional[datetime]]:
+    dates = []
+    for item in batch:
+        dt = iso_to_datetime(item.get("timestamp"))
+        if dt:
+            dates.append(dt)
+    if not dates:
+        return None, None
+    return max(dates), min(dates)
+
+
+def paginate_posts_with_cache(
     url: str,
     params: Dict[str, Any],
-    limit: Optional[int] = None,
-    label: str = "data",
-    resume: bool = False,
-    checkpoint_path: Optional[Path] = None,
-    checkpoint_enabled: bool = False,
+    since: datetime,
+    limit: Optional[int],
+    resume: bool,
+    checkpoint_path: Path,
+    cache_path: Path,
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     next_url: Optional[str] = url
     next_params: Optional[Dict[str, Any]] = params
     page = 1
+    total_saved = 0
+    global_oldest = None
 
-    if resume and checkpoint_path:
+    if resume:
         checkpoint = load_checkpoint(checkpoint_path)
+        cached_rows = read_jsonl(cache_path)
         if checkpoint:
-            checkpoint_label = checkpoint.get("label")
-            if checkpoint_label and checkpoint_label != label:
-                log(f"Checkpoint ditemukan tetapi label berbeda ({checkpoint_label}), checkpoint diabaikan.")
-            else:
-                rows = checkpoint.get("rows", []) or []
-                next_url = checkpoint.get("next_url")
-                next_params = None
-                page = int(checkpoint.get("next_page", 1) or 1)
-                log(
-                    f"Resume aktif untuk {label}: mulai dari page {page}, "
-                    f"data tersimpan {len(rows)} row, checkpoint={checkpoint_path}"
-                )
-                if not next_url:
-                    log(f"Checkpoint {label} menandakan pagination sebelumnya sudah selesai.")
-                    return rows[:limit] if limit else rows
+            next_url = checkpoint.get("next_url")
+            next_params = None
+            page = int(checkpoint.get("next_page", 1) or 1)
+            total_saved = int(checkpoint.get("total_saved", len(cached_rows)) or len(cached_rows))
+            global_oldest = iso_to_datetime(checkpoint.get("global_oldest_date"))
+            rows = cached_rows
+            log(
+                f"Resume aktif untuk posts: page berikutnya {page}, cache rows={len(rows)}, "
+                f"tanggal terlama sementara={checkpoint.get('global_oldest_date') or '-'}"
+            )
+            if not next_url:
+                log("Checkpoint posts menandakan pagination sebelumnya sudah selesai.")
+                return rows[:limit] if limit else rows
         else:
             log(f"--resume aktif tetapi checkpoint belum ada: {checkpoint_path}")
+            if cached_rows:
+                log(f"Cache ditemukan ({len(cached_rows)} row), tetapi checkpoint tidak ada. Cache diabaikan agar data tidak duplikat.")
+    else:
+        delete_file(checkpoint_path, "Checkpoint lama")
+        delete_file(cache_path, "Cache posts lama")
 
     while next_url:
         data = request_json(next_url, next_params)
         batch = data.get("data", [])
-        batch_count = len(batch) if isinstance(batch, list) else 0
+        if not isinstance(batch, list):
+            batch = []
+
+        newest, oldest = batch_date_range(batch)
+        usable_batch = []
+        for item in batch:
+            dt = iso_to_datetime(item.get("timestamp"))
+            if dt and dt < since:
+                continue
+            usable_batch.append(item)
+
+        rows.extend(usable_batch)
+        append_jsonl(cache_path, usable_batch)
+        total_saved += len(usable_batch)
+
+        if oldest and (not global_oldest or oldest < global_oldest):
+            global_oldest = oldest
+
+        if newest and oldest:
+            log(
+                f"Fetch posts: page {page}, batch {len(batch)}, dipakai {len(usable_batch)}, total sementara {len(rows)} "
+                f"| tanggal page: {newest.date().isoformat()} -> {oldest.date().isoformat()} "
+                f"| batas: {since.date().isoformat()}"
+            )
+        else:
+            log(f"Fetch posts: page {page}, batch {len(batch)}, dipakai {len(usable_batch)}, total sementara {len(rows)}")
+
+        next_page_url = data.get("paging", {}).get("next")
+        save_checkpoint(
+            checkpoint_path,
+            {
+                "label": "posts",
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "next_page": page + 1,
+                "next_url": next_page_url,
+                "total_saved": total_saved,
+                "cache_path": str(cache_path),
+                "limit": limit,
+                "global_oldest_date": global_oldest.isoformat() if global_oldest else None,
+                "since": since.isoformat(),
+            },
+        )
+        log(f"Checkpoint ringan tersimpan: page berikutnya {page + 1}, cache_rows={total_saved}")
+
+        if limit and len(rows) >= limit:
+            log(f"Fetch posts: mencapai limit {limit}")
+            return rows[:limit]
+
+        if oldest and oldest < since:
+            log(
+                f"Stop fetch posts: sudah melewati batas 1 tahun. "
+                f"Tanggal terlama page={oldest.date().isoformat()}, batas={since.date().isoformat()}"
+            )
+            break
+
+        if not next_page_url:
+            break
+
+        next_url = next_page_url
+        next_params = None
+        page += 1
+
+    return rows[:limit] if limit else rows
+
+
+def paginate(url: str, params: Dict[str, Any], limit: Optional[int] = None, label: str = "data") -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    next_url: Optional[str] = url
+    next_params: Optional[Dict[str, Any]] = params
+    page = 1
+
+    while next_url:
+        data = request_json(next_url, next_params)
+        batch = data.get("data", [])
         if isinstance(batch, list):
             rows.extend(batch)
-
-        paging = data.get("paging", {})
-        next_page_url = paging.get("next")
+            batch_count = len(batch)
+        else:
+            batch_count = 0
 
         log(f"Fetch {label}: page {page}, batch {batch_count}, total sementara {len(rows)}")
-
-        if checkpoint_enabled and checkpoint_path:
-            save_checkpoint(
-                checkpoint_path,
-                {
-                    "label": label,
-                    "saved_at": datetime.now(timezone.utc).isoformat(),
-                    "next_page": page + 1,
-                    "next_url": next_page_url,
-                    "rows": rows,
-                    "limit": limit,
-                },
-            )
-            log(f"Checkpoint tersimpan: page berikutnya {page + 1}, total {len(rows)} row")
 
         if limit and len(rows) >= limit:
             log(f"Fetch {label}: mencapai limit {limit}")
             return rows[:limit]
 
-        next_url = next_page_url
+        next_url = data.get("paging", {}).get("next")
         next_params = None
         page += 1
 
@@ -234,27 +334,26 @@ def fetch_instagram_posts(
     max_posts: Optional[int],
     resume: bool,
     checkpoint_path: Path,
+    cache_path: Path,
 ) -> List[Dict[str, Any]]:
     fields = ",".join(["id", "caption", "timestamp", "permalink", "media_type", "media_product_type", "like_count", "comments_count"])
     url = f"{GRAPH_BASE_URL}/{ig_user_id}/media"
     params = {"fields": fields, "limit": 100, "access_token": access_token}
 
     log(f"Mulai mengambil daftar post dari Instagram Graph API sejak {since.date().isoformat()}")
-    raw_posts = paginate(
-        url,
-        params,
-        max_posts,
-        label="posts",
-        resume=resume,
-        checkpoint_path=checkpoint_path,
-        checkpoint_enabled=True,
-    )
+    raw_posts = paginate_posts_with_cache(url, params, since, max_posts, resume, checkpoint_path, cache_path)
 
     posts = []
     skipped = 0
     newest_date = None
     oldest_date = None
+    seen_ids = set()
     for post in raw_posts:
+        post_id = post.get("id")
+        if post_id and post_id in seen_ids:
+            continue
+        if post_id:
+            seen_ids.add(post_id)
         timestamp = iso_to_datetime(post.get("timestamp"))
         if timestamp:
             newest_date = max(newest_date, timestamp) if newest_date else timestamp
@@ -266,11 +365,12 @@ def fetch_instagram_posts(
 
     log(
         "Selesai mengambil post. "
-        f"Total mentah: {len(raw_posts)}, dipakai: {len(posts)}, dilewati karena di luar range: {skipped}, "
+        f"Total cache: {len(raw_posts)}, unik dipakai: {len(posts)}, dilewati karena di luar range: {skipped}, "
         f"tanggal terbaru: {newest_date.date().isoformat() if newest_date else '-'}, "
         f"tanggal terlama: {oldest_date.date().isoformat() if oldest_date else '-'}"
     )
-    delete_checkpoint(checkpoint_path)
+    delete_file(checkpoint_path, "Checkpoint posts")
+    delete_file(cache_path, "Cache posts")
     return posts
 
 
@@ -292,54 +392,19 @@ def make_edge_key(source: str, target: str, relation: str, context_id: str = "")
     return source, target, relation, context_id
 
 
-def add_edge(
-    edges: Dict[Tuple[str, str, str, str], Dict[str, Any]],
-    source: str,
-    target: str,
-    source_type: str,
-    target_type: str,
-    relation: str,
-    context_type: str = "",
-    context_id: str = "",
-    post_id: str = "",
-    post_shortcode: str = "",
-    created_at: str = "",
-    weight: int = 1,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> None:
+def add_edge(edges: Dict[Tuple[str, str, str, str], Dict[str, Any]], source: str, target: str, source_type: str, target_type: str, relation: str, context_type: str = "", context_id: str = "", post_id: str = "", post_shortcode: str = "", created_at: str = "", weight: int = 1, metadata: Optional[Dict[str, Any]] = None) -> None:
     if not source or not target or source == target:
         return
 
     key = make_edge_key(source, target, relation, context_id)
     if key not in edges:
-        edges[key] = {
-            "source": source,
-            "source_type": source_type,
-            "target": target,
-            "target_type": target_type,
-            "relation": relation,
-            "weight": 0,
-            "platform": "instagram",
-            "context_type": context_type,
-            "context_id": context_id,
-            "post_id": post_id,
-            "post_shortcode": post_shortcode,
-            "created_at": created_at,
-            "metadata": {},
-        }
+        edges[key] = {"source": source, "source_type": source_type, "target": target, "target_type": target_type, "relation": relation, "weight": 0, "platform": "instagram", "context_type": context_type, "context_id": context_id, "post_id": post_id, "post_shortcode": post_shortcode, "created_at": created_at, "metadata": {}}
     edges[key]["weight"] += weight
     if metadata:
         edges[key]["metadata"].update(metadata)
 
 
-def build_sna_edges(
-    posts: List[Dict[str, Any]],
-    access_token: str,
-    ig_username: str,
-    since: datetime,
-    max_comments_per_post: Optional[int],
-    include_replies_endpoint: bool,
-) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+def build_sna_edges(posts: List[Dict[str, Any]], access_token: str, ig_username: str, since: datetime, max_comments_per_post: Optional[int], include_replies_endpoint: bool) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     edges: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
     counters = Counter()
     account_node = node_id("user", ig_username)
@@ -369,22 +434,12 @@ def build_sna_edges(
         hashtags = extract_hashtags(caption)
         mentions = extract_mentions(caption)
 
-        log(
-            f"[POST {index}/{total_posts}] tanggal={date_label} id={media_id} "
-            f"likes={like_count} comments_count={comments_count} hashtags={len(hashtags)} mentions={len(mentions)}"
-        )
+        log(f"[POST {index}/{total_posts}] tanggal={date_label} id={media_id} likes={like_count} comments_count={comments_count} hashtags={len(hashtags)} mentions={len(mentions)}")
 
         counters["posts"] += 1
         author_to_posts[account_node].append(post_node)
 
-        add_edge(edges, account_node, post_node, "user", "post", "created_post", "post", media_id, media_id, shortcode, timestamp, metadata={
-            "caption": caption[:500],
-            "permalink": permalink,
-            "media_type": post.get("media_type", ""),
-            "media_product_type": post.get("media_product_type", ""),
-            "like_count": like_count,
-            "comments_count": comments_count,
-        })
+        add_edge(edges, account_node, post_node, "user", "post", "created_post", "post", media_id, media_id, shortcode, timestamp, metadata={"caption": caption[:500], "permalink": permalink, "media_type": post.get("media_type", ""), "media_product_type": post.get("media_product_type", ""), "like_count": like_count, "comments_count": comments_count})
 
         for tag in hashtags:
             hashtag_node = node_id("hashtag", tag)
@@ -399,9 +454,7 @@ def build_sna_edges(
             add_edge(edges, post_node, mentioned_user, "post", "user", "post_mentions_user", "post", media_id, media_id, shortcode, timestamp)
 
         if like_count > 0:
-            add_edge(edges, account_node, post_node, "user", "post", "received_likes_count", "post", f"{media_id}:likes_count", media_id, shortcode, timestamp, weight=like_count, metadata={
-                "note": "Instagram Graph API generally exposes like_count, not the list of users who liked the post."
-            })
+            add_edge(edges, account_node, post_node, "user", "post", "received_likes_count", "post", f"{media_id}:likes_count", media_id, shortcode, timestamp, weight=like_count, metadata={"note": "Instagram Graph API generally exposes like_count, not the list of users who liked the post."})
 
         comments = fetch_comments(media_id, access_token, max_comments_per_post, index, total_posts)
         counters["comments"] += len(comments)
@@ -472,11 +525,7 @@ def build_sna_edges(
         elapsed = time.time() - start_time
         avg = elapsed / index
         eta = avg * (total_posts - index)
-        log(
-            f"   └─ selesai post {index}/{total_posts}: valid_comments={valid_comments}, "
-            f"old_comments_skipped={skipped_old_comments}, replies={reply_total_for_post}, "
-            f"edges_sementara={len(edges)}, durasi_post={format_duration(time.time() - post_start)}, ETA={format_duration(eta)}"
-        )
+        log(f"   └─ selesai post {index}/{total_posts}: valid_comments={valid_comments}, old_comments_skipped={skipped_old_comments}, replies={reply_total_for_post}, edges_sementara={len(edges)}, durasi_post={format_duration(time.time() - post_start)}, ETA={format_duration(eta)}")
 
     log("Membuat relasi post->post berdasarkan same_author dan shared_hashtag...")
     for _, post_nodes in author_to_posts.items():
@@ -522,16 +571,19 @@ def main() -> None:
     parser.add_argument("--max-comments-per-post", type=int, default=None, help="Batas komentar per post. Kosongkan untuk semua komentar yang tersedia.")
     parser.add_argument("--include-replies-endpoint", action="store_true", help="Coba request endpoint replies jika replies tidak ikut muncul di response comments.")
     parser.add_argument("--resume", action="store_true", help="Lanjutkan fetch posts dari checkpoint jika proses sebelumnya berhenti/gagal.")
-    parser.add_argument("--clear-checkpoint", action="store_true", help="Hapus checkpoint lama sebelum menjalankan export.")
-    parser.add_argument("--checkpoint-file", default="storage/datasets/instagram_sna/checkpoints/posts_checkpoint.json", help="Lokasi file checkpoint untuk resume fetch posts.")
+    parser.add_argument("--clear-checkpoint", action="store_true", help="Hapus checkpoint/cache lama sebelum menjalankan export.")
+    parser.add_argument("--checkpoint-file", default="storage/datasets/instagram_sna/checkpoints/posts_checkpoint.json", help="Lokasi file checkpoint ringan untuk resume fetch posts.")
+    parser.add_argument("--posts-cache-file", default="storage/datasets/instagram_sna/checkpoints/posts_cache.jsonl", help="Lokasi cache posts JSONL untuk resume tanpa menulis JSON besar.")
     args = parser.parse_args()
 
     total_start = time.time()
     load_env_file(args.env)
 
     checkpoint_path = Path(args.checkpoint_file)
+    posts_cache_path = Path(args.posts_cache_file)
     if args.clear_checkpoint:
-        delete_checkpoint(checkpoint_path)
+        delete_file(checkpoint_path, "Checkpoint lama")
+        delete_file(posts_cache_path, "Cache posts lama")
 
     access_token = env_first(ENV_TOKEN_KEYS)
     ig_user_id = env_first(ENV_IG_ID_KEYS)
@@ -547,8 +599,9 @@ def main() -> None:
     log(f"Range data: {since.date().isoformat()} sampai {datetime.now(timezone.utc).date().isoformat()}")
     log(f"Output: {args.output}")
     log(f"Checkpoint posts: {checkpoint_path}")
+    log(f"Cache posts: {posts_cache_path}")
 
-    posts = fetch_instagram_posts(ig_user_id, access_token, since, args.max_posts, args.resume, checkpoint_path)
+    posts = fetch_instagram_posts(ig_user_id, access_token, since, args.max_posts, args.resume, checkpoint_path, posts_cache_path)
     if not posts:
         log("Tidak ada post yang ditemukan pada rentang tanggal tersebut.")
 
@@ -560,15 +613,7 @@ def main() -> None:
     type_summary = Counter(f"{row['source_type']}->{row['target_type']}" for row in rows)
 
     log("Export selesai.")
-    print(json.dumps({
-        "output": str(output_path),
-        "rows": len(rows),
-        "raw_counts": counters,
-        "relation_summary": dict(relation_summary),
-        "type_summary": dict(type_summary),
-        "duration": format_duration(time.time() - total_start),
-        "note": "Instagram Graph API umumnya hanya menyediakan like_count, bukan daftar user yang melakukan like. Karena itu like disimpan sebagai received_likes_count pada relasi user->post dengan weight sesuai like_count."
-    }, indent=2, ensure_ascii=False))
+    print(json.dumps({"output": str(output_path), "rows": len(rows), "raw_counts": counters, "relation_summary": dict(relation_summary), "type_summary": dict(type_summary), "duration": format_duration(time.time() - total_start), "note": "Instagram Graph API umumnya hanya menyediakan like_count, bukan daftar user yang melakukan like. Karena itu like disimpan sebagai received_likes_count pada relasi user->post dengan weight sesuai like_count."}, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
