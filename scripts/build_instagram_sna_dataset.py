@@ -1,561 +1,691 @@
 import argparse
 import csv
 import json
+import os
 import re
+import time
+import urllib.parse
+import urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-DATE_FIELDS = [
-    "created_at",
-    "createdAt",
-    "timestamp",
-    "taken_at",
-    "takenAt",
-    "posted_at",
-    "postedAt",
-    "date",
-]
-
-POST_ID_FIELDS = [
-    "post_id",
-    "postId",
-    "shortcode",
-    "code",
-    "media_id",
-    "mediaId",
-    "id",
-    "_id",
-]
-
-TEXT_FIELDS = ["caption", "text", "content", "comment", "message", "body"]
+GRAPH_API_VERSION = "v19.0"
+GRAPH_BASE_URL = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
 HASHTAG_REGEX = re.compile(r"#([A-Za-z0-9_]+)")
 MENTION_REGEX = re.compile(r"@([A-Za-z0-9_.]+)")
 URL_REGEX = re.compile(r"https?://\S+")
 
+ENV_TOKEN_KEYS = [
+    "INSTAGRAM_ACCESS_TOKEN",
+    "IG_ACCESS_TOKEN",
+    "META_ACCESS_TOKEN",
+    "FACEBOOK_ACCESS_TOKEN",
+]
 
-def parse_date(value: Any) -> Optional[datetime]:
-    if value is None:
-        return None
+ENV_IG_ID_KEYS = [
+    "INSTAGRAM_BUSINESS_ACCOUNT_ID",
+    "IG_BUSINESS_ACCOUNT_ID",
+    "INSTAGRAM_ACCOUNT_ID",
+]
 
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
 
-    if isinstance(value, (int, float)):
-        try:
-            if value > 10_000_000_000:
-                value = value / 1000
-            return datetime.fromtimestamp(value, tz=timezone.utc)
-        except Exception:
-            return None
+class InstagramApiError(Exception):
+    pass
 
-    raw = str(value).strip()
-    if not raw:
-        return None
 
-    if raw.isdigit():
-        try:
-            number = int(raw)
-            if number > 10_000_000_000:
-                number = number / 1000
-            return datetime.fromtimestamp(number, tz=timezone.utc)
-        except Exception:
-            pass
+def load_env_file(path: str = ".env") -> None:
+    env_path = Path(path)
+    if not env_path.exists():
+        return
 
-    try:
-        raw_iso = raw.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(raw_iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        pass
-
-    for fmt in [
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-        "%d/%m/%Y",
-        "%d-%m-%Y",
-        "%m/%d/%Y",
-    ]:
-        try:
-            return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
-        except Exception:
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
             continue
 
-    return None
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ["'", '"']:
+            value = value[1:-1]
+
+        value = value.replace("\\n", "\n")
+        os.environ.setdefault(key, value)
 
 
-def first_value(doc: Dict[str, Any], fields: Iterable[str], default: Any = None) -> Any:
-    for field in fields:
-        value = doc.get(field)
-        if value not in [None, ""]:
+def env_first(keys: Iterable[str], default: Optional[str] = None) -> Optional[str]:
+    for key in keys:
+        value = os.getenv(key)
+        if value:
             return value
     return default
 
 
-def normalize_id(value: Any, prefix: str) -> Optional[str]:
-    if value is None:
-        return None
-    value = str(value).strip()
+def iso_to_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
-    value = value.replace("ObjectId(", "").replace(")", "").replace("'", "")
-    return f"{prefix}:{value}"
-
-
-def normalize_username(value: Any) -> Optional[str]:
-    if value is None:
+    try:
+        value = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
         return None
-    if isinstance(value, dict):
-        value = first_value(value, ["username", "user_name", "name", "id"])
-    value = str(value).strip().lower().replace("@", "")
+
+
+def clean_text(value: Optional[str]) -> str:
     if not value:
-        return None
-    return f"user:{value}"
-
-
-def clean_text(value: Any) -> str:
-    if value is None:
         return ""
-    text = str(value)
-    text = URL_REGEX.sub("", text)
+    text = URL_REGEX.sub("", value)
     return " ".join(text.split())
 
 
 def extract_hashtags(text: str) -> List[str]:
-    return sorted({f"hashtag:{tag.lower()}" for tag in HASHTAG_REGEX.findall(text or "")})
+    return sorted({tag.lower() for tag in HASHTAG_REGEX.findall(text or "")})
 
 
 def extract_mentions(text: str) -> List[str]:
-    return sorted({f"user:{mention.lower()}" for mention in MENTION_REGEX.findall(text or "")})
+    return sorted({mention.lower() for mention in MENTION_REGEX.findall(text or "")})
 
 
-def get_doc_date(doc: Dict[str, Any]) -> Optional[datetime]:
-    for field in DATE_FIELDS:
-        dt = parse_date(doc.get(field))
-        if dt:
-            return dt
-    return None
+def node_id(node_type: str, raw_id: Any) -> str:
+    value = str(raw_id or "").strip().lower()
+    value = value.replace("@", "")
+    return f"{node_type}:{value}"
 
 
-def read_csv(path: Path) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8-sig", newline="") as file:
-        return [dict(row) for row in csv.DictReader(file)]
+def request_json(url: str, params: Optional[Dict[str, Any]] = None, retries: int = 3) -> Dict[str, Any]:
+    final_url = url
+    if params:
+        query = urllib.parse.urlencode(params)
+        final_url = f"{url}?{query}"
+
+    last_error = None
+    for attempt in range(retries):
+        try:
+            request = urllib.request.Request(final_url, headers={"User-Agent": "SNA-Instagram-Exporter/1.0"})
+            with urllib.request.urlopen(request, timeout=60) as response:
+                payload = response.read().decode("utf-8")
+                data = json.loads(payload)
+
+            if "error" in data:
+                raise InstagramApiError(json.dumps(data["error"], ensure_ascii=False))
+            return data
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries - 1:
+                time.sleep(2 * (attempt + 1))
+            else:
+                break
+
+    raise InstagramApiError(str(last_error))
 
 
-def read_json(path: Path) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8") as file:
-        data = json.load(file)
+def paginate(url: str, params: Dict[str, Any], limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    next_url: Optional[str] = url
+    next_params: Optional[Dict[str, Any]] = params
 
-    if isinstance(data, list):
-        return [row for row in data if isinstance(row, dict)]
+    while next_url:
+        data = request_json(next_url, next_params)
+        batch = data.get("data", [])
+        if isinstance(batch, list):
+            rows.extend(batch)
 
-    if isinstance(data, dict):
-        for key in ["data", "items", "results", "posts", "comments", "replies", "likes"]:
-            value = data.get(key)
-            if isinstance(value, list):
-                return [row for row in value if isinstance(row, dict)]
-        return [data]
+        if limit and len(rows) >= limit:
+            return rows[:limit]
 
-    return []
+        next_url = data.get("paging", {}).get("next")
+        next_params = None
 
-
-def read_table(path_value: Optional[str]) -> List[Dict[str, Any]]:
-    if not path_value:
-        return []
-
-    path = Path(path_value)
-    suffix = path.suffix.lower()
-
-    if suffix == ".csv":
-        return read_csv(path)
-    if suffix == ".json":
-        return read_json(path)
-
-    raise SystemExit(f"Format file tidak didukung: {path}. Gunakan .csv atau .json")
+    return rows
 
 
-def filter_last_days(rows: List[Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
-    since = datetime.now(timezone.utc) - timedelta(days=days)
-    filtered = []
+def fetch_instagram_posts(ig_user_id: str, access_token: str, since: datetime, max_posts: Optional[int]) -> List[Dict[str, Any]]:
+    fields = ",".join(
+        [
+            "id",
+            "caption",
+            "timestamp",
+            "permalink",
+            "media_type",
+            "media_product_type",
+            "like_count",
+            "comments_count",
+        ]
+    )
+    url = f"{GRAPH_BASE_URL}/{ig_user_id}/media"
+    params = {
+        "fields": fields,
+        "limit": 100,
+        "access_token": access_token,
+    }
 
-    for row in rows:
-        dt = get_doc_date(row)
-        if not dt or dt >= since:
-            filtered.append(row)
+    posts = []
+    for post in paginate(url, params, max_posts):
+        timestamp = iso_to_datetime(post.get("timestamp"))
+        if timestamp and timestamp < since:
+            continue
+        posts.append(post)
 
-    return filtered
+    return posts
 
 
-def add_node(nodes: Dict[str, Dict[str, Any]], node_id: Optional[str], node_type: str, label: str, **attrs: Any) -> None:
-    if not node_id:
-        return
-    if node_id not in nodes:
-        nodes[node_id] = {
-            "id": node_id,
-            "type": node_type,
-            "label": label or node_id,
-            **attrs,
-        }
-    else:
-        nodes[node_id].update({k: v for k, v in attrs.items() if v not in [None, ""]})
+def fetch_comments(media_id: str, access_token: str, max_comments_per_post: Optional[int]) -> List[Dict[str, Any]]:
+    fields = "id,text,username,timestamp,like_count,replies{id,text,username,timestamp,like_count}"
+    url = f"{GRAPH_BASE_URL}/{media_id}/comments"
+    params = {
+        "fields": fields,
+        "limit": 100,
+        "access_token": access_token,
+    }
+    return paginate(url, params, max_comments_per_post)
+
+
+def fetch_replies(comment_id: str, access_token: str) -> List[Dict[str, Any]]:
+    fields = "id,text,username,timestamp,like_count"
+    url = f"{GRAPH_BASE_URL}/{comment_id}/replies"
+    params = {
+        "fields": fields,
+        "limit": 100,
+        "access_token": access_token,
+    }
+    return paginate(url, params)
+
+
+def make_edge_key(source: str, target: str, relation: str, context_id: str = "") -> Tuple[str, str, str, str]:
+    return source, target, relation, context_id
 
 
 def add_edge(
-    edge_counter: Counter,
-    edge_attrs: Dict[Tuple[str, str, str], Dict[str, Any]],
-    source: Optional[str],
-    target: Optional[str],
+    edges: Dict[Tuple[str, str, str, str], Dict[str, Any]],
+    source: str,
+    target: str,
+    source_type: str,
+    target_type: str,
     relation: str,
-    **attrs: Any,
+    context_type: str = "",
+    context_id: str = "",
+    post_id: str = "",
+    post_shortcode: str = "",
+    created_at: str = "",
+    weight: int = 1,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     if not source or not target or source == target:
         return
 
-    key = (source, target, relation)
-    edge_counter[key] += 1
+    key = make_edge_key(source, target, relation, context_id)
+    if key not in edges:
+        edges[key] = {
+            "source": source,
+            "source_type": source_type,
+            "target": target,
+            "target_type": target_type,
+            "relation": relation,
+            "weight": 0,
+            "platform": "instagram",
+            "context_type": context_type,
+            "context_id": context_id,
+            "post_id": post_id,
+            "post_shortcode": post_shortcode,
+            "created_at": created_at,
+            "metadata": {},
+        }
 
-    if key not in edge_attrs:
-        edge_attrs[key] = attrs
-    else:
-        for attr_key, attr_value in attrs.items():
-            if attr_value not in [None, ""]:
-                edge_attrs[key][attr_key] = attr_value
-
-
-def resolve_post_id(doc: Dict[str, Any]) -> Optional[str]:
-    return normalize_id(first_value(doc, POST_ID_FIELDS), "post")
-
-
-def resolve_post_owner(doc: Dict[str, Any]) -> Optional[str]:
-    owner = first_value(
-        doc,
-        [
-            "owner_username",
-            "ownerUsername",
-            "account_username",
-            "accountUsername",
-            "user_username",
-            "userUsername",
-            "author_username",
-            "authorUsername",
-            "username",
-            "owner",
-            "author",
-            "user",
-        ],
-    )
-    return normalize_username(owner)
+    edges[key]["weight"] += weight
+    if metadata:
+        edges[key]["metadata"].update(metadata)
 
 
-def resolve_actor(doc: Dict[str, Any]) -> Optional[str]:
-    actor = first_value(
-        doc,
-        [
-            "username",
-            "user_username",
-            "userUsername",
-            "author_username",
-            "authorUsername",
-            "commenter_username",
-            "commenterUsername",
-            "liker_username",
-            "likerUsername",
-            "from_username",
-            "fromUsername",
-            "actor_username",
-            "actorUsername",
-            "user",
-            "author",
-        ],
-    )
-    return normalize_username(actor)
+def build_sna_edges(
+    posts: List[Dict[str, Any]],
+    access_token: str,
+    ig_username: str,
+    since: datetime,
+    max_comments_per_post: Optional[int],
+    include_replies_endpoint: bool,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    edges: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+    counters = Counter()
+    account_node = node_id("user", ig_username)
+    hashtag_to_posts: Dict[str, List[str]] = defaultdict(list)
+    author_to_posts: Dict[str, List[str]] = defaultdict(list)
+    commenter_by_comment_id: Dict[str, str] = {}
 
-
-def resolve_text(doc: Dict[str, Any]) -> str:
-    return clean_text(first_value(doc, TEXT_FIELDS, ""))
-
-
-def resolve_related_post_id(doc: Dict[str, Any]) -> Optional[str]:
-    return normalize_id(
-        first_value(
-            doc,
-            [
-                "post_id",
-                "postId",
-                "media_id",
-                "mediaId",
-                "shortcode",
-                "code",
-                "target_post_id",
-                "targetPostId",
-            ],
-        ),
-        "post",
-    )
-
-
-def write_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: List[str]) -> None:
-    with path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-
-
-def build_dataset(args: argparse.Namespace) -> Dict[str, Any]:
-    posts = filter_last_days(read_table(args.posts), args.days)
-    comments = filter_last_days(read_table(args.comments), args.days)
-    replies = filter_last_days(read_table(args.replies), args.days)
-    likes = filter_last_days(read_table(args.likes), args.days)
-
-    if not posts:
-        raise SystemExit(
-            "Data posts kosong atau file tidak ditemukan. Gunakan --posts path/to/posts.csv atau --posts path/to/posts.json"
-        )
-
-    nodes: Dict[str, Dict[str, Any]] = {}
-    edge_counter: Counter = Counter()
-    edge_attrs: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-
-    post_owner_map: Dict[str, str] = {}
-    comment_author_map: Dict[str, str] = {}
-    user_posts: Dict[str, List[str]] = defaultdict(list)
-    hashtag_posts: Dict[str, List[str]] = defaultdict(list)
-
-    for post in posts:
-        post_id = resolve_post_id(post)
-        if not post_id:
+    for index, post in enumerate(posts, start=1):
+        media_id = str(post.get("id", "")).strip()
+        if not media_id:
             continue
 
-        text = resolve_text(post)
-        owner = resolve_post_owner(post)
-        dt = get_doc_date(post)
-        shortcode = str(first_value(post, ["shortcode", "code"], ""))
-        label = shortcode or post_id.replace("post:", "")
+        post_node = node_id("post", media_id)
+        timestamp = post.get("timestamp", "")
+        caption = clean_text(post.get("caption", ""))
+        permalink = post.get("permalink", "")
+        like_count = int(post.get("like_count") or 0)
+        comments_count = int(post.get("comments_count") or 0)
+        shortcode = permalink.rstrip("/").split("/")[-1] if permalink else media_id
 
-        add_node(
-            nodes,
-            post_id,
+        counters["posts"] += 1
+        author_to_posts[account_node].append(post_node)
+
+        add_edge(
+            edges,
+            account_node,
+            post_node,
+            "user",
             "post",
-            label,
-            created_at=dt.isoformat() if dt else "",
-            caption=text[:250],
-            source="instagram",
+            "created_post",
+            context_type="post",
+            context_id=media_id,
+            post_id=media_id,
+            post_shortcode=shortcode,
+            created_at=timestamp,
+            metadata={
+                "caption": caption[:500],
+                "permalink": permalink,
+                "media_type": post.get("media_type", ""),
+                "media_product_type": post.get("media_product_type", ""),
+                "like_count": like_count,
+                "comments_count": comments_count,
+            },
         )
 
-        if owner:
-            add_node(nodes, owner, "user", owner.replace("user:", ""), source="instagram")
-            add_edge(edge_counter, edge_attrs, owner, post_id, "created_post", source="instagram")
-            post_owner_map[post_id] = owner
-            user_posts[owner].append(post_id)
+        for tag in extract_hashtags(caption):
+            hashtag_node = node_id("hashtag", tag)
+            hashtag_to_posts[hashtag_node].append(post_node)
 
-        for hashtag in extract_hashtags(text):
-            add_node(nodes, hashtag, "hashtag", hashtag.replace("hashtag:", "#"), source="instagram")
-            add_edge(edge_counter, edge_attrs, post_id, hashtag, "post_has_hashtag", source="instagram")
-            add_edge(edge_counter, edge_attrs, hashtag, post_id, "hashtag_used_in_post", source="instagram")
-            hashtag_posts[hashtag].append(post_id)
+            add_edge(
+                edges,
+                account_node,
+                hashtag_node,
+                "user",
+                "hashtag",
+                "user_used_hashtag",
+                context_type="post",
+                context_id=media_id,
+                post_id=media_id,
+                post_shortcode=shortcode,
+                created_at=timestamp,
+            )
+            add_edge(
+                edges,
+                hashtag_node,
+                post_node,
+                "hashtag",
+                "post",
+                "hashtag_to_post",
+                context_type="post",
+                context_id=media_id,
+                post_id=media_id,
+                post_shortcode=shortcode,
+                created_at=timestamp,
+            )
+            add_edge(
+                edges,
+                post_node,
+                hashtag_node,
+                "post",
+                "hashtag",
+                "post_has_hashtag",
+                context_type="post",
+                context_id=media_id,
+                post_id=media_id,
+                post_shortcode=shortcode,
+                created_at=timestamp,
+            )
 
-            if owner:
-                add_edge(edge_counter, edge_attrs, owner, hashtag, "user_used_hashtag", source="instagram")
+        for mention in extract_mentions(caption):
+            mentioned_user = node_id("user", mention)
+            add_edge(
+                edges,
+                account_node,
+                mentioned_user,
+                "user",
+                "user",
+                "mentioned_user_in_caption",
+                context_type="post",
+                context_id=media_id,
+                post_id=media_id,
+                post_shortcode=shortcode,
+                created_at=timestamp,
+            )
+            add_edge(
+                edges,
+                post_node,
+                mentioned_user,
+                "post",
+                "user",
+                "post_mentions_user",
+                context_type="post",
+                context_id=media_id,
+                post_id=media_id,
+                post_shortcode=shortcode,
+                created_at=timestamp,
+            )
 
-        for mentioned_user in extract_mentions(text):
-            add_node(nodes, mentioned_user, "user", mentioned_user.replace("user:", ""), source="instagram")
-            add_edge(edge_counter, edge_attrs, post_id, mentioned_user, "post_mentions_user", source="instagram")
-            if owner:
-                add_edge(edge_counter, edge_attrs, owner, mentioned_user, "mentions", source="instagram")
+        if like_count > 0:
+            add_edge(
+                edges,
+                account_node,
+                post_node,
+                "user",
+                "post",
+                "received_likes_count",
+                context_type="post",
+                context_id=f"{media_id}:likes_count",
+                post_id=media_id,
+                post_shortcode=shortcode,
+                created_at=timestamp,
+                weight=like_count,
+                metadata={
+                    "note": "Instagram Graph API generally exposes like_count, not the list of users who liked the post."
+                },
+            )
 
-    for comment in comments:
-        actor = resolve_actor(comment)
-        post_id = resolve_related_post_id(comment)
-        comment_id = normalize_id(first_value(comment, ["comment_id", "commentId", "id", "_id"]), "comment")
-        text = resolve_text(comment)
+        comments = fetch_comments(media_id, access_token, max_comments_per_post)
+        counters["comments"] += len(comments)
 
-        if actor:
-            add_node(nodes, actor, "user", actor.replace("user:", ""), source="instagram")
-        if comment_id:
-            comment_author_map[comment_id] = actor or ""
+        for comment in comments:
+            comment_id = str(comment.get("id", "")).strip()
+            comment_text = clean_text(comment.get("text", ""))
+            comment_username = str(comment.get("username", "")).strip().lower()
+            comment_timestamp = comment.get("timestamp", timestamp)
+            comment_dt = iso_to_datetime(comment_timestamp)
 
-        if post_id:
-            add_edge(edge_counter, edge_attrs, actor, post_id, "commented_on_post", source="instagram", text=text[:250])
-            owner = post_owner_map.get(post_id)
-            if owner and actor:
-                add_edge(edge_counter, edge_attrs, actor, owner, "comment_interaction", source="instagram")
+            if comment_dt and comment_dt < since:
+                continue
+            if not comment_username:
+                continue
 
-        for hashtag in extract_hashtags(text):
-            add_node(nodes, hashtag, "hashtag", hashtag.replace("hashtag:", "#"), source="instagram")
-            add_edge(edge_counter, edge_attrs, actor, hashtag, "user_used_hashtag_in_comment", source="instagram")
-            if post_id:
-                add_edge(edge_counter, edge_attrs, hashtag, post_id, "hashtag_appears_in_comment_on_post", source="instagram")
+            commenter_node = node_id("user", comment_username)
+            commenter_by_comment_id[comment_id] = commenter_node
 
-        for mentioned_user in extract_mentions(text):
-            add_node(nodes, mentioned_user, "user", mentioned_user.replace("user:", ""), source="instagram")
-            add_edge(edge_counter, edge_attrs, actor, mentioned_user, "mentions", source="instagram")
+            add_edge(
+                edges,
+                commenter_node,
+                post_node,
+                "user",
+                "post",
+                "commented_on_post",
+                context_type="comment",
+                context_id=comment_id,
+                post_id=media_id,
+                post_shortcode=shortcode,
+                created_at=comment_timestamp,
+                metadata={"text": comment_text[:500], "comment_like_count": int(comment.get("like_count") or 0)},
+            )
+            add_edge(
+                edges,
+                commenter_node,
+                account_node,
+                "user",
+                "user",
+                "commented_to_post_owner",
+                context_type="comment",
+                context_id=comment_id,
+                post_id=media_id,
+                post_shortcode=shortcode,
+                created_at=comment_timestamp,
+                metadata={"text": comment_text[:500]},
+            )
 
-    for reply in replies:
-        actor = resolve_actor(reply)
-        post_id = resolve_related_post_id(reply)
-        parent_comment_id = normalize_id(
-            first_value(reply, ["parent_comment_id", "parentCommentId", "comment_id", "commentId"]),
-            "comment",
-        )
-        replied_to = normalize_username(
-            first_value(reply, ["reply_to_username", "replyToUsername", "parent_username", "parentUsername"])
-        )
-        text = resolve_text(reply)
-
-        if not replied_to and parent_comment_id:
-            replied_to = comment_author_map.get(parent_comment_id)
-
-        if actor:
-            add_node(nodes, actor, "user", actor.replace("user:", ""), source="instagram")
-
-        if replied_to:
-            add_node(nodes, replied_to, "user", replied_to.replace("user:", ""), source="instagram")
-            add_edge(edge_counter, edge_attrs, actor, replied_to, "reply_interaction", source="instagram", text=text[:250])
-
-        if post_id:
-            add_edge(edge_counter, edge_attrs, actor, post_id, "replied_on_post", source="instagram", text=text[:250])
-            owner = post_owner_map.get(post_id)
-            if owner and actor:
-                add_edge(edge_counter, edge_attrs, actor, owner, "reply_to_post_owner", source="instagram")
-
-    for like in likes:
-        actor = resolve_actor(like)
-        post_id = resolve_related_post_id(like)
-
-        if actor:
-            add_node(nodes, actor, "user", actor.replace("user:", ""), source="instagram")
-
-        if post_id:
-            add_edge(edge_counter, edge_attrs, actor, post_id, "liked_post", source="instagram")
-            owner = post_owner_map.get(post_id)
-            if owner and actor:
-                add_edge(edge_counter, edge_attrs, actor, owner, "like_interaction", source="instagram")
-
-    for _, post_ids in user_posts.items():
-        sorted_posts = sorted(set(post_ids))
-        for index, source_post in enumerate(sorted_posts):
-            for target_post in sorted_posts[index + 1 : index + 1 + args.max_post_links_per_group]:
-                add_edge(edge_counter, edge_attrs, source_post, target_post, "same_author", source="instagram")
-                add_edge(edge_counter, edge_attrs, target_post, source_post, "same_author", source="instagram")
-
-    for hashtag, post_ids in hashtag_posts.items():
-        sorted_posts = sorted(set(post_ids))
-        for index, source_post in enumerate(sorted_posts):
-            for target_post in sorted_posts[index + 1 : index + 1 + args.max_post_links_per_group]:
+            for tag in extract_hashtags(comment_text):
+                hashtag_node = node_id("hashtag", tag)
                 add_edge(
-                    edge_counter,
-                    edge_attrs,
-                    source_post,
-                    target_post,
-                    "shared_hashtag",
-                    source="instagram",
-                    hashtag=hashtag,
+                    edges,
+                    commenter_node,
+                    hashtag_node,
+                    "user",
+                    "hashtag",
+                    "user_used_hashtag_in_comment",
+                    context_type="comment",
+                    context_id=comment_id,
+                    post_id=media_id,
+                    post_shortcode=shortcode,
+                    created_at=comment_timestamp,
                 )
                 add_edge(
-                    edge_counter,
-                    edge_attrs,
-                    target_post,
-                    source_post,
-                    "shared_hashtag",
-                    source="instagram",
-                    hashtag=hashtag,
+                    edges,
+                    hashtag_node,
+                    post_node,
+                    "hashtag",
+                    "post",
+                    "hashtag_to_post_from_comment",
+                    context_type="comment",
+                    context_id=comment_id,
+                    post_id=media_id,
+                    post_shortcode=shortcode,
+                    created_at=comment_timestamp,
                 )
 
-    edge_rows = []
-    for (source, target, relation), weight in edge_counter.items():
-        attrs = edge_attrs.get((source, target, relation), {})
-        edge_rows.append(
-            {
-                "source": source,
-                "target": target,
-                "relation": relation,
-                "weight": weight,
-                "source_platform": attrs.get("source", "instagram"),
-                "hashtag": attrs.get("hashtag", ""),
-                "text": attrs.get("text", ""),
-            }
-        )
+            for mention in extract_mentions(comment_text):
+                mentioned_user = node_id("user", mention)
+                add_edge(
+                    edges,
+                    commenter_node,
+                    mentioned_user,
+                    "user",
+                    "user",
+                    "mentioned_user_in_comment",
+                    context_type="comment",
+                    context_id=comment_id,
+                    post_id=media_id,
+                    post_shortcode=shortcode,
+                    created_at=comment_timestamp,
+                    metadata={"text": comment_text[:500]},
+                )
 
-    node_rows = list(nodes.values())
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+            embedded_replies = comment.get("replies", {}).get("data", []) if isinstance(comment.get("replies"), dict) else []
+            replies = embedded_replies
+            if include_replies_endpoint and comment_id and not replies:
+                try:
+                    replies = fetch_replies(comment_id, access_token)
+                except Exception:
+                    replies = []
 
-    write_csv(
-        out_dir / "instagram_sna_nodes.csv",
-        node_rows,
-        ["id", "type", "label", "source", "created_at", "caption"],
-    )
-    write_csv(
-        out_dir / "instagram_sna_edges.csv",
-        edge_rows,
-        ["source", "target", "relation", "weight", "source_platform", "hashtag", "text"],
-    )
+            counters["replies"] += len(replies)
+            for reply in replies:
+                reply_id = str(reply.get("id", "")).strip()
+                reply_username = str(reply.get("username", "")).strip().lower()
+                reply_text = clean_text(reply.get("text", ""))
+                reply_timestamp = reply.get("timestamp", comment_timestamp)
+                reply_dt = iso_to_datetime(reply_timestamp)
 
-    graph_json = {
-        "metadata": {
-            "source": "instagram",
-            "range_days": args.days,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "input_files": {
-                "posts": args.posts,
-                "comments": args.comments,
-                "replies": args.replies,
-                "likes": args.likes,
-            },
-            "raw_counts": {
-                "posts": len(posts),
-                "comments": len(comments),
-                "replies": len(replies),
-                "likes": len(likes),
-            },
-            "graph_counts": {
-                "nodes": len(node_rows),
-                "edges": len(edge_rows),
-            },
-        },
-        "nodes": node_rows,
-        "edges": edge_rows,
-    }
+                if reply_dt and reply_dt < since:
+                    continue
+                if not reply_username:
+                    continue
 
-    with (out_dir / "instagram_sna_graph.json").open("w", encoding="utf-8") as file:
-        json.dump(graph_json, file, ensure_ascii=False, indent=2, default=str)
+                replier_node = node_id("user", reply_username)
+                add_edge(
+                    edges,
+                    replier_node,
+                    commenter_node,
+                    "user",
+                    "user",
+                    "replied_to_user",
+                    context_type="reply",
+                    context_id=reply_id or comment_id,
+                    post_id=media_id,
+                    post_shortcode=shortcode,
+                    created_at=reply_timestamp,
+                    metadata={"text": reply_text[:500], "parent_comment_id": comment_id},
+                )
+                add_edge(
+                    edges,
+                    replier_node,
+                    post_node,
+                    "user",
+                    "post",
+                    "replied_on_post",
+                    context_type="reply",
+                    context_id=reply_id or comment_id,
+                    post_id=media_id,
+                    post_shortcode=shortcode,
+                    created_at=reply_timestamp,
+                    metadata={"text": reply_text[:500], "parent_comment_id": comment_id},
+                )
 
-    return {
-        "output_dir": str(out_dir),
-        "nodes": len(node_rows),
-        "edges": len(edge_rows),
-        "node_summary": dict(Counter(node["type"] for node in node_rows)),
-        "relation_summary": dict(Counter(edge["relation"] for edge in edge_rows)),
-        "metadata": graph_json["metadata"],
-    }
+                for mention in extract_mentions(reply_text):
+                    mentioned_user = node_id("user", mention)
+                    add_edge(
+                        edges,
+                        replier_node,
+                        mentioned_user,
+                        "user",
+                        "user",
+                        "mentioned_user_in_reply",
+                        context_type="reply",
+                        context_id=reply_id or comment_id,
+                        post_id=media_id,
+                        post_shortcode=shortcode,
+                        created_at=reply_timestamp,
+                        metadata={"text": reply_text[:500]},
+                    )
+
+    for _, post_nodes in author_to_posts.items():
+        unique_posts = sorted(set(post_nodes))
+        for source_index, source_post in enumerate(unique_posts):
+            for target_post in unique_posts[source_index + 1 : source_index + 31]:
+                add_edge(
+                    edges,
+                    source_post,
+                    target_post,
+                    "post",
+                    "post",
+                    "same_author",
+                    context_type="post_similarity",
+                    context_id=f"{source_post}|{target_post}|same_author",
+                )
+                add_edge(
+                    edges,
+                    target_post,
+                    source_post,
+                    "post",
+                    "post",
+                    "same_author",
+                    context_type="post_similarity",
+                    context_id=f"{target_post}|{source_post}|same_author",
+                )
+
+    for hashtag_node, post_nodes in hashtag_to_posts.items():
+        unique_posts = sorted(set(post_nodes))
+        for source_index, source_post in enumerate(unique_posts):
+            for target_post in unique_posts[source_index + 1 : source_index + 31]:
+                add_edge(
+                    edges,
+                    source_post,
+                    target_post,
+                    "post",
+                    "post",
+                    "shared_hashtag",
+                    context_type="post_similarity",
+                    context_id=f"{source_post}|{target_post}|{hashtag_node}",
+                    metadata={"hashtag": hashtag_node},
+                )
+                add_edge(
+                    edges,
+                    target_post,
+                    source_post,
+                    "post",
+                    "post",
+                    "shared_hashtag",
+                    context_type="post_similarity",
+                    context_id=f"{target_post}|{source_post}|{hashtag_node}",
+                    metadata={"hashtag": hashtag_node},
+                )
+
+    rows = []
+    for edge in edges.values():
+        edge["metadata"] = json.dumps(edge.get("metadata", {}), ensure_ascii=False)
+        rows.append(edge)
+
+    return rows, dict(counters)
+
+
+def write_single_csv(output_path: Path, rows: List[Dict[str, Any]]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "source",
+        "source_type",
+        "target",
+        "target_type",
+        "relation",
+        "weight",
+        "platform",
+        "context_type",
+        "context_id",
+        "post_id",
+        "post_shortcode",
+        "created_at",
+        "metadata",
+    ]
+
+    with output_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build dataset CSV Social Network Analysis dari file export Instagram 1 tahun terakhir."
+        description="Export dataset Social Network Analysis Instagram dari Instagram Graph API ke satu file CSV."
     )
-    parser.add_argument("--posts", required=True, help="Path file posts Instagram (.csv atau .json)")
-    parser.add_argument("--comments", default=None, help="Path file comments Instagram (.csv atau .json)")
-    parser.add_argument("--replies", default=None, help="Path file replies Instagram (.csv atau .json)")
-    parser.add_argument("--likes", default=None, help="Path file likes Instagram (.csv atau .json)")
-    parser.add_argument("--output-dir", default="storage/datasets/instagram_sna")
-    parser.add_argument("--days", type=int, default=365)
-    parser.add_argument("--max-post-links-per-group", type=int, default=30)
+    parser.add_argument("--env", default=".env", help="Path file .env")
+    parser.add_argument("--output", default="storage/datasets/instagram_sna/instagram_sna_dataset.csv")
+    parser.add_argument("--days", type=int, default=365, help="Rentang data yang diambil dalam hari")
+    parser.add_argument("--max-posts", type=int, default=None, help="Batas jumlah post. Kosongkan untuk semua post dalam rentang hari.")
+    parser.add_argument("--max-comments-per-post", type=int, default=None, help="Batas komentar per post. Kosongkan untuk semua komentar yang tersedia.")
+    parser.add_argument("--include-replies-endpoint", action="store_true", help="Coba request endpoint replies jika replies tidak ikut muncul di response comments.")
     args = parser.parse_args()
 
-    result = build_dataset(args)
-    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    load_env_file(args.env)
+
+    access_token = env_first(ENV_TOKEN_KEYS)
+    ig_user_id = env_first(ENV_IG_ID_KEYS)
+    ig_username = os.getenv("INSTAGRAM_USERNAME", "instagram_account")
+
+    if not access_token:
+        raise SystemExit("INSTAGRAM_ACCESS_TOKEN tidak ditemukan di .env")
+    if not ig_user_id:
+        raise SystemExit("INSTAGRAM_BUSINESS_ACCOUNT_ID tidak ditemukan di .env")
+
+    since = datetime.now(timezone.utc) - timedelta(days=args.days)
+
+    print(f"Mengambil data Instagram @{ig_username} selama {args.days} hari terakhir...")
+    posts = fetch_instagram_posts(ig_user_id, access_token, since, args.max_posts)
+    print(f"Post ditemukan: {len(posts)}")
+
+    rows, counters = build_sna_edges(
+        posts=posts,
+        access_token=access_token,
+        ig_username=ig_username,
+        since=since,
+        max_comments_per_post=args.max_comments_per_post,
+        include_replies_endpoint=args.include_replies_endpoint,
+    )
+
+    output_path = Path(args.output)
+    write_single_csv(output_path, rows)
+
+    relation_summary = Counter(row["relation"] for row in rows)
+    type_summary = Counter(f"{row['source_type']}->{row['target_type']}" for row in rows)
+
+    print("Export selesai.")
+    print(json.dumps({
+        "output": str(output_path),
+        "rows": len(rows),
+        "raw_counts": counters,
+        "relation_summary": dict(relation_summary),
+        "type_summary": dict(type_summary),
+        "note": "Instagram Graph API umumnya hanya menyediakan like_count, bukan daftar user yang melakukan like. Karena itu like disimpan sebagai received_likes_count pada relasi user->post dengan weight sesuai like_count."
+    }, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
