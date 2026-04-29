@@ -70,6 +70,32 @@ def env_first(keys: Iterable[str], default: Optional[str] = None) -> Optional[st
     return default
 
 
+def load_checkpoint(checkpoint_path: Path) -> Optional[Dict[str, Any]]:
+    if not checkpoint_path.exists():
+        return None
+
+    try:
+        with checkpoint_path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except Exception as exc:
+        log(f"Checkpoint ada tetapi gagal dibaca: {exc}")
+        return None
+
+
+def save_checkpoint(checkpoint_path: Path, payload: Dict[str, Any]) -> None:
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+    with temp_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2, default=str)
+    temp_path.replace(checkpoint_path)
+
+
+def delete_checkpoint(checkpoint_path: Path) -> None:
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+        log(f"Checkpoint dihapus karena fetch posts sudah selesai: {checkpoint_path}")
+
+
 def iso_to_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
@@ -129,11 +155,40 @@ def request_json(url: str, params: Optional[Dict[str, Any]] = None, retries: int
     raise InstagramApiError(str(last_error))
 
 
-def paginate(url: str, params: Dict[str, Any], limit: Optional[int] = None, label: str = "data") -> List[Dict[str, Any]]:
+def paginate(
+    url: str,
+    params: Dict[str, Any],
+    limit: Optional[int] = None,
+    label: str = "data",
+    resume: bool = False,
+    checkpoint_path: Optional[Path] = None,
+    checkpoint_enabled: bool = False,
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     next_url: Optional[str] = url
     next_params: Optional[Dict[str, Any]] = params
     page = 1
+
+    if resume and checkpoint_path:
+        checkpoint = load_checkpoint(checkpoint_path)
+        if checkpoint:
+            checkpoint_label = checkpoint.get("label")
+            if checkpoint_label and checkpoint_label != label:
+                log(f"Checkpoint ditemukan tetapi label berbeda ({checkpoint_label}), checkpoint diabaikan.")
+            else:
+                rows = checkpoint.get("rows", []) or []
+                next_url = checkpoint.get("next_url")
+                next_params = None
+                page = int(checkpoint.get("next_page", 1) or 1)
+                log(
+                    f"Resume aktif untuk {label}: mulai dari page {page}, "
+                    f"data tersimpan {len(rows)} row, checkpoint={checkpoint_path}"
+                )
+                if not next_url:
+                    log(f"Checkpoint {label} menandakan pagination sebelumnya sudah selesai.")
+                    return rows[:limit] if limit else rows
+        else:
+            log(f"--resume aktif tetapi checkpoint belum ada: {checkpoint_path}")
 
     while next_url:
         data = request_json(next_url, next_params)
@@ -142,26 +197,58 @@ def paginate(url: str, params: Dict[str, Any], limit: Optional[int] = None, labe
         if isinstance(batch, list):
             rows.extend(batch)
 
+        paging = data.get("paging", {})
+        next_page_url = paging.get("next")
+
         log(f"Fetch {label}: page {page}, batch {batch_count}, total sementara {len(rows)}")
+
+        if checkpoint_enabled and checkpoint_path:
+            save_checkpoint(
+                checkpoint_path,
+                {
+                    "label": label,
+                    "saved_at": datetime.now(timezone.utc).isoformat(),
+                    "next_page": page + 1,
+                    "next_url": next_page_url,
+                    "rows": rows,
+                    "limit": limit,
+                },
+            )
+            log(f"Checkpoint tersimpan: page berikutnya {page + 1}, total {len(rows)} row")
 
         if limit and len(rows) >= limit:
             log(f"Fetch {label}: mencapai limit {limit}")
             return rows[:limit]
 
-        next_url = data.get("paging", {}).get("next")
+        next_url = next_page_url
         next_params = None
         page += 1
 
     return rows
 
 
-def fetch_instagram_posts(ig_user_id: str, access_token: str, since: datetime, max_posts: Optional[int]) -> List[Dict[str, Any]]:
+def fetch_instagram_posts(
+    ig_user_id: str,
+    access_token: str,
+    since: datetime,
+    max_posts: Optional[int],
+    resume: bool,
+    checkpoint_path: Path,
+) -> List[Dict[str, Any]]:
     fields = ",".join(["id", "caption", "timestamp", "permalink", "media_type", "media_product_type", "like_count", "comments_count"])
     url = f"{GRAPH_BASE_URL}/{ig_user_id}/media"
     params = {"fields": fields, "limit": 100, "access_token": access_token}
 
     log(f"Mulai mengambil daftar post dari Instagram Graph API sejak {since.date().isoformat()}")
-    raw_posts = paginate(url, params, max_posts, label="posts")
+    raw_posts = paginate(
+        url,
+        params,
+        max_posts,
+        label="posts",
+        resume=resume,
+        checkpoint_path=checkpoint_path,
+        checkpoint_enabled=True,
+    )
 
     posts = []
     skipped = 0
@@ -183,6 +270,7 @@ def fetch_instagram_posts(ig_user_id: str, access_token: str, since: datetime, m
         f"tanggal terbaru: {newest_date.date().isoformat() if newest_date else '-'}, "
         f"tanggal terlama: {oldest_date.date().isoformat() if oldest_date else '-'}"
     )
+    delete_checkpoint(checkpoint_path)
     return posts
 
 
@@ -433,10 +521,17 @@ def main() -> None:
     parser.add_argument("--max-posts", type=int, default=None, help="Batas jumlah post. Kosongkan untuk semua post dalam rentang hari.")
     parser.add_argument("--max-comments-per-post", type=int, default=None, help="Batas komentar per post. Kosongkan untuk semua komentar yang tersedia.")
     parser.add_argument("--include-replies-endpoint", action="store_true", help="Coba request endpoint replies jika replies tidak ikut muncul di response comments.")
+    parser.add_argument("--resume", action="store_true", help="Lanjutkan fetch posts dari checkpoint jika proses sebelumnya berhenti/gagal.")
+    parser.add_argument("--clear-checkpoint", action="store_true", help="Hapus checkpoint lama sebelum menjalankan export.")
+    parser.add_argument("--checkpoint-file", default="storage/datasets/instagram_sna/checkpoints/posts_checkpoint.json", help="Lokasi file checkpoint untuk resume fetch posts.")
     args = parser.parse_args()
 
     total_start = time.time()
     load_env_file(args.env)
+
+    checkpoint_path = Path(args.checkpoint_file)
+    if args.clear_checkpoint:
+        delete_checkpoint(checkpoint_path)
 
     access_token = env_first(ENV_TOKEN_KEYS)
     ig_user_id = env_first(ENV_IG_ID_KEYS)
@@ -451,8 +546,9 @@ def main() -> None:
     log(f"Mulai export Instagram SNA untuk @{ig_username}")
     log(f"Range data: {since.date().isoformat()} sampai {datetime.now(timezone.utc).date().isoformat()}")
     log(f"Output: {args.output}")
+    log(f"Checkpoint posts: {checkpoint_path}")
 
-    posts = fetch_instagram_posts(ig_user_id, access_token, since, args.max_posts)
+    posts = fetch_instagram_posts(ig_user_id, access_token, since, args.max_posts, args.resume, checkpoint_path)
     if not posts:
         log("Tidak ada post yang ditemukan pada rentang tanggal tersebut.")
 
