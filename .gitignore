@@ -215,3 +215,5 @@ data_cache.json
 dataset.csv
 dataset_ss*.csv
 generated_graphs/
+posts_checkpoint.json
+instagram_sna_dataset*.csv

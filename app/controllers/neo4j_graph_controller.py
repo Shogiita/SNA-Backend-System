@@ -18,18 +18,19 @@ os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
 HASHTAG_REGEX = re.compile(r"#\w+")
 
 async def create_graph_visualization_from_neo4j(
-    limit: int = 25000,
+    limit: int = 1000,
     mode: int = 2,
     max_edges: int = 25000
 ):
     try:
         G = nx.DiGraph()
 
-        safe_max_edges = min(max_edges, 25000)
+        safe_node_limit = max(1, min(int(limit), 25000))
+        safe_max_edges = max(1, min(int(max_edges), 25000))
 
         with neo4j_driver.session() as session:
             if mode == 2:
-                query = """
+                query_posts = """
                 MATCH (u:FirebaseUser)-[:POSTED_FB]->(p)
                 WHERE p:FirebaseKawanSS OR p:FirebaseInfoss
                 RETURN u.id AS uid,
@@ -38,15 +39,50 @@ async def create_graph_visualization_from_neo4j(
                        coalesce(p.deskripsi, p.judul, p.detail, p.title, '') AS text,
                        labels(p) AS p_labels,
                        coalesce(toInteger(p.jumlahLike), 0) AS likes
-                LIMIT $max_edges
+                LIMIT $node_limit
                 """
 
-                records = session.run(query, max_edges=safe_max_edges).data()
+                query_comments = """
+                MATCH (u:FirebaseUser)-[:WROTE_FB]->(c)-[:COMMENTED_ON_FB]->(p)
+                WHERE c:FirebaseKawanSSComment OR c:FirebaseInfossComment
+                RETURN u.id AS uid,
+                       coalesce(u.nama, u.username, u.id, '') AS uname,
+                       c.id AS cid,
+                       coalesce(c.komentar, c.text, '') AS text,
+                       labels(c) AS c_labels,
+                       p.id AS target_id
+                LIMIT $node_limit
+                """
 
-                for r in records:
-                    uid = str(r.get("uid", "")).strip()
-                    uname = str(r.get("uname", "")).strip()
-                    pid = str(r.get("pid", "")).strip()
+                query_likes = """
+                MATCH (u:FirebaseUser)-[r]->(p)
+                WHERE type(r) IN ['LIKES_KAWAN_FB', 'LIKES_INFO_FB']
+                RETURN u.id AS uid,
+                       coalesce(u.nama, u.username, u.id, '') AS uname,
+                       p.id AS target_id,
+                       type(r) AS rel_type
+                LIMIT $edge_limit
+                """
+
+                posts_data = session.run(
+                    query_posts,
+                    node_limit=safe_node_limit
+                ).data()
+
+                comments_data = session.run(
+                    query_comments,
+                    node_limit=safe_node_limit
+                ).data()
+
+                likes_data = session.run(
+                    query_likes,
+                    edge_limit=safe_max_edges
+                ).data()
+
+                for record in posts_data:
+                    uid = str(record.get("uid", "")).strip()
+                    uname = str(record.get("uname", "")).strip()
+                    pid = str(record.get("pid", "")).strip()
 
                     if (
                         not uid
@@ -59,8 +95,8 @@ async def create_graph_visualization_from_neo4j(
 
                     user_node = f"user_{uid}"
                     post_node = f"post_{pid}"
-                    text = r.get("text") or ""
-                    labels = r.get("p_labels", [])
+                    text = record.get("text") or ""
+                    labels = record.get("p_labels", [])
 
                     post_type = (
                         "post_infoss"
@@ -82,7 +118,7 @@ async def create_graph_visualization_from_neo4j(
                             type=post_type,
                             label=text[:20] + "..." if len(text) > 20 else text,
                             full_text=text[:300],
-                            likes=r.get("likes", 0),
+                            likes=record.get("likes", 0),
                         )
 
                     G.add_edge(
@@ -92,10 +128,143 @@ async def create_graph_visualization_from_neo4j(
                         weight=5,
                     )
 
-            else:
+                    hashtags = set(HASHTAG_REGEX.findall(text.lower()))
+
+                    for tag in hashtags:
+                        hashtag_node = f"tag_{tag}"
+
+                        if not G.has_node(hashtag_node):
+                            G.add_node(
+                                hashtag_node,
+                                type="hashtag",
+                                label=f"#{tag}",
+                            )
+
+                        G.add_edge(
+                            post_node,
+                            hashtag_node,
+                            relation="HAS_HASHTAG",
+                            weight=2,
+                        )
+
+                for record in comments_data:
+                    uid = str(record.get("uid", "")).strip()
+                    uname = str(record.get("uname", "")).strip()
+                    cid = str(record.get("cid", "")).strip()
+                    target_id = str(record.get("target_id", "")).strip()
+
+                    if (
+                        not uid
+                        or not cid
+                        or not target_id
+                        or is_ignored_app_user(uid)
+                        or is_ignored_app_user(uname)
+                        or is_ignored_app_user(f"user_{uid}")
+                    ):
+                        continue
+
+                    user_node = f"user_{uid}"
+                    comment_node = f"comment_{cid}"
+                    target_node = f"post_{target_id}"
+                    text = record.get("text") or ""
+                    labels = record.get("c_labels", [])
+
+                    comment_type = (
+                        "comment_infoss"
+                        if "FirebaseInfossComment" in labels
+                        else "comment_kawanss"
+                    )
+
+                    if not G.has_node(user_node):
+                        G.add_node(
+                            user_node,
+                            type="user",
+                            label=uname,
+                            name=uname,
+                        )
+
+                    if not G.has_node(comment_node):
+                        G.add_node(
+                            comment_node,
+                            type=comment_type,
+                            label=text[:20] + "..." if len(text) > 20 else text,
+                            full_text=text[:300],
+                        )
+
+                    if G.has_node(target_node):
+                        G.add_edge(
+                            user_node,
+                            comment_node,
+                            relation="WROTE",
+                            weight=3,
+                        )
+
+                        G.add_edge(
+                            comment_node,
+                            target_node,
+                            relation="COMMENTED_ON",
+                            weight=3,
+                        )
+
+                        hashtags = set(HASHTAG_REGEX.findall(text.lower()))
+
+                        for tag in hashtags:
+                            hashtag_node = f"tag_{tag}"
+
+                            if not G.has_node(hashtag_node):
+                                G.add_node(
+                                    hashtag_node,
+                                    type="hashtag",
+                                    label=f"#{tag}",
+                                )
+
+                            G.add_edge(
+                                comment_node,
+                                hashtag_node,
+                                relation="HAS_HASHTAG",
+                                weight=2,
+                            )
+
+                for record in likes_data:
+                    uid = str(record.get("uid", "")).strip()
+                    uname = str(record.get("uname", "")).strip()
+                    target_id = str(record.get("target_id", "")).strip()
+
+                    if (
+                        not uid
+                        or not target_id
+                        or is_ignored_app_user(uid)
+                        or is_ignored_app_user(uname)
+                        or is_ignored_app_user(f"user_{uid}")
+                    ):
+                        continue
+
+                    user_node = f"user_{uid}"
+                    target_node = f"post_{target_id}"
+
+                    if G.has_node(user_node) and G.has_node(target_node):
+                        G.add_edge(
+                            user_node,
+                            target_node,
+                            relation="LIKED",
+                            weight=1,
+                        )
+
+            elif mode == 1:
                 query = """
                 CALL {
                     MATCH (u1:FirebaseUser)-[:LIKES_KAWAN_FB]->(p:FirebaseKawanSS)<-[:POSTED_FB]-(u2:FirebaseUser)
+                    WHERE u1.id <> u2.id
+                    RETURN u1.id AS source_id,
+                           coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
+                           u2.id AS target_id,
+                           coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
+                           1 AS weight,
+                           'LIKE' AS relation
+
+                    UNION ALL
+
+                    MATCH (u1:FirebaseUser)-[:LIKES_INFO_FB]->(p:FirebaseInfoss)<-[:POSTED_FB]-(u2:FirebaseUser)
                     WHERE u1.id <> u2.id
                     RETURN u1.id AS source_id,
                            coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
@@ -114,20 +283,49 @@ async def create_graph_visualization_from_neo4j(
                            coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
                            3 AS weight,
                            'COMMENT' AS relation
+
+                    UNION ALL
+
+                    MATCH (u1:FirebaseUser)-[:WROTE_FB]->(c:FirebaseInfossComment)-[:COMMENTED_ON_FB]->(p:FirebaseInfoss)<-[:POSTED_FB]-(u2:FirebaseUser)
+                    WHERE u1.id <> u2.id
+                    RETURN u1.id AS source_id,
+                           coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
+                           u2.id AS target_id,
+                           coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
+                           3 AS weight,
+                           'COMMENT' AS relation
                 }
-                LIMIT $max_edges
+                WITH source_id,
+                     source_name,
+                     target_id,
+                     target_name,
+                     relation,
+                     sum(weight) AS total_weight
+                RETURN source_id,
+                       source_name,
+                       target_id,
+                       target_name,
+                       total_weight AS weight,
+                       collect(DISTINCT relation) AS relations
+                ORDER BY weight DESC
+                LIMIT $edge_limit
                 """
 
-                records = session.run(query, max_edges=safe_max_edges).data()
+                records = session.run(
+                    query,
+                    edge_limit=safe_max_edges
+                ).data()
 
-                for r in records:
-                    source_id = str(r.get("source_id", "")).strip()
-                    target_id = str(r.get("target_id", "")).strip()
-                    source_name = str(r.get("source_name", "")).strip()
-                    target_name = str(r.get("target_name", "")).strip()
+                for record in records:
+                    source_id = str(record.get("source_id", "")).strip()
+                    target_id = str(record.get("target_id", "")).strip()
+                    source_name = str(record.get("source_name", "")).strip()
+                    target_name = str(record.get("target_name", "")).strip()
 
                     if (
-                        is_ignored_app_user(source_id)
+                        not source_id
+                        or not target_id
+                        or is_ignored_app_user(source_id)
                         or is_ignored_app_user(target_id)
                         or is_ignored_app_user(source_name)
                         or is_ignored_app_user(target_name)
@@ -155,12 +353,36 @@ async def create_graph_visualization_from_neo4j(
                             label=target_name,
                         )
 
+                    relations = record.get("relations", [])
+                    relation_text = (
+                        ", ".join(relations)
+                        if isinstance(relations, list)
+                        else str(relations)
+                    )
+
                     G.add_edge(
                         source_node,
                         target_node,
-                        relation=r.get("relation", "INTERACTION"),
-                        weight=r.get("weight", 1),
+                        relation=relation_text or "INTERACTION",
+                        weight=record.get("weight", 1),
                     )
+
+                if G.number_of_nodes() > safe_node_limit:
+                    degree_map_for_limit = dict(G.degree(weight="weight"))
+
+                    selected_nodes = sorted(
+                        G.nodes(),
+                        key=lambda node: degree_map_for_limit.get(node, 0),
+                        reverse=True,
+                    )[:safe_node_limit]
+
+                    G = G.subgraph(selected_nodes).copy()
+
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="mode harus 1 atau 2"
+                )
 
         clean_graph_nodes(G, source="app")
         G.remove_nodes_from(list(nx.isolates(G)))
@@ -171,18 +393,56 @@ async def create_graph_visualization_from_neo4j(
                 detail="Tidak ada relasi data yang ditemukan di Neo4j.",
             )
 
-        apply_leiden_communities(G, weight_attr="weight")
+        if G.number_of_edges() > safe_max_edges:
+            sorted_edges = sorted(
+                G.edges(data=True),
+                key=lambda edge: edge[2].get("weight", 1),
+                reverse=True,
+            )[:safe_max_edges]
+
+            edge_node_ids = set()
+
+            for source, target, _ in sorted_edges:
+                edge_node_ids.add(source)
+                edge_node_ids.add(target)
+
+            H = nx.DiGraph()
+            H.add_nodes_from((node, G.nodes[node]) for node in edge_node_ids)
+            H.add_edges_from((source, target, data) for source, target, data in sorted_edges)
+            G = H
+
+        community_map = apply_leiden_communities(G, weight_attr="weight")
 
         degree_map = dict(G.degree(weight="weight"))
         max_degree = max(degree_map.values()) if degree_map else 1
 
+        cluster_size_map = {}
+
+        for cluster_id in community_map.values():
+            cluster_size_map[cluster_id] = cluster_size_map.get(cluster_id, 0) + 1
+
         nodes_output = []
+
         for node in G.nodes():
             attr = G.nodes[node].copy()
+
+            cluster_id = int(community_map.get(node, attr.get("community", 0)))
+            cluster_size = int(attr.get("cluster_size", cluster_size_map.get(cluster_id, 1)))
+            cluster_label = str(attr.get("cluster_label", f"Cluster {cluster_id}"))
+
+            attr["community"] = cluster_id
+            attr["cluster_id"] = cluster_id
+            attr["cluster_size"] = cluster_size
+            attr["cluster_label"] = cluster_label
+
             degree = degree_map.get(node, 0)
 
             nodes_output.append({
                 "id": node,
+                "community": cluster_id,
+                "cluster_id": cluster_id,
+                "cluster_size": cluster_size,
+                "cluster_label": cluster_label,
                 "attributes": attr,
                 "metrics": {
                     "degree": degree / max_degree if max_degree else 0.0,
@@ -195,24 +455,34 @@ async def create_graph_visualization_from_neo4j(
             })
 
         edges_output = []
+
+        valid_nodes = {node["id"] for node in nodes_output}
+
         for source, target, data in G.edges(data=True):
+            if source not in valid_nodes or target not in valid_nodes:
+                continue
+
             edges_output.append({
                 "source": source,
                 "target": target,
                 "weight": data.get("weight", 1),
                 "attributes": {
                     "relation": data.get("relation", "INTERACTION"),
+                    "weight": data.get("weight", 1),
                 },
             })
 
         return {
             "message": (
                 f"Graf visualisasi berhasil dibuat "
-                f"(Nodes: {len(nodes_output)}, Edges: {len(edges_output)}, Mode: {mode})."
+                f"(Nodes: {len(nodes_output)}, Edges: {len(edges_output)}, "
+                f"Mode: {mode}, Limit: {safe_node_limit})."
             ),
             "graph_info": {
                 "nodes_count": len(nodes_output),
                 "edges_count": len(edges_output),
+                "communities_count": len(set(community_map.values())),
+                "clusters_count": len(set(community_map.values())),
                 "nodes": nodes_output,
                 "edges": edges_output,
             },
@@ -229,7 +499,7 @@ async def create_graph_visualization_from_neo4j(
             status_code=500,
             detail=f"Gagal membuat graf visualisasi Neo4j: {str(e)}",
         )
-        
+              
 def _build_neo4j_graph_internal(limit: int, mode: int):
     G = nx.DiGraph()
 
@@ -526,227 +796,7 @@ def _build_neo4j_graph_internal(limit: int, mode: int):
     apply_leiden_communities(G, weight_attr="weight")
 
     return G
-
-async def create_graph_visualization_from_neo4j(
-    limit: int = 25000,
-    mode: int = 2,
-    max_edges: int = 25000
-):
-    try:
-        G = nx.DiGraph()
-
-        safe_max_edges = min(max_edges, 25000)
-
-        with neo4j_driver.session() as session:
-            if mode == 2:
-                query = """
-                MATCH (u:FirebaseUser)-[:POSTED_FB]->(p)
-                WHERE p:FirebaseKawanSS OR p:FirebaseInfoss
-                RETURN u.id AS uid,
-                       coalesce(u.nama, u.username, u.id, '') AS uname,
-                       p.id AS pid,
-                       coalesce(p.deskripsi, p.judul, p.detail, p.title, '') AS text,
-                       labels(p) AS p_labels,
-                       coalesce(toInteger(p.jumlahLike), 0) AS likes
-                LIMIT $max_edges
-                """
-
-                records = session.run(query, max_edges=safe_max_edges).data()
-
-                for r in records:
-                    uid = str(r.get("uid", "")).strip()
-                    uname = str(r.get("uname", "")).strip()
-                    pid = str(r.get("pid", "")).strip()
-
-                    if (
-                        not uid
-                        or not pid
-                        or is_ignored_app_user(uid)
-                        or is_ignored_app_user(uname)
-                        or is_ignored_app_user(f"user_{uid}")
-                    ):
-                        continue
-
-                    user_node = f"user_{uid}"
-                    post_node = f"post_{pid}"
-                    text = r.get("text") or ""
-                    labels = r.get("p_labels", [])
-
-                    post_type = (
-                        "post_infoss"
-                        if "FirebaseInfoss" in labels
-                        else "post_kawanss"
-                    )
-
-                    if not G.has_node(user_node):
-                        G.add_node(
-                            user_node,
-                            type="user",
-                            label=uname,
-                            name=uname,
-                        )
-
-                    if not G.has_node(post_node):
-                        G.add_node(
-                            post_node,
-                            type=post_type,
-                            label=text[:20] + "..." if len(text) > 20 else text,
-                            full_text=text[:300],
-                            likes=r.get("likes", 0),
-                        )
-
-                    G.add_edge(
-                        user_node,
-                        post_node,
-                        relation="AUTHORED",
-                        weight=5,
-                    )
-
-            else:
-                query = """
-                CALL {
-                    MATCH (u1:FirebaseUser)-[:LIKES_KAWAN_FB]->(p:FirebaseKawanSS)<-[:POSTED_FB]-(u2:FirebaseUser)
-                    WHERE u1.id <> u2.id
-                    RETURN u1.id AS source_id,
-                           coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
-                           u2.id AS target_id,
-                           coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
-                           1 AS weight,
-                           'LIKE' AS relation
-
-                    UNION ALL
-
-                    MATCH (u1:FirebaseUser)-[:WROTE_FB]->(c:FirebaseKawanSSComment)-[:COMMENTED_ON_FB]->(p:FirebaseKawanSS)<-[:POSTED_FB]-(u2:FirebaseUser)
-                    WHERE u1.id <> u2.id
-                    RETURN u1.id AS source_id,
-                           coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
-                           u2.id AS target_id,
-                           coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
-                           3 AS weight,
-                           'COMMENT' AS relation
-                }
-                LIMIT $max_edges
-                """
-
-                records = session.run(query, max_edges=safe_max_edges).data()
-
-                for r in records:
-                    source_id = str(r.get("source_id", "")).strip()
-                    target_id = str(r.get("target_id", "")).strip()
-                    source_name = str(r.get("source_name", "")).strip()
-                    target_name = str(r.get("target_name", "")).strip()
-
-                    if (
-                        is_ignored_app_user(source_id)
-                        or is_ignored_app_user(target_id)
-                        or is_ignored_app_user(source_name)
-                        or is_ignored_app_user(target_name)
-                        or is_ignored_app_user(f"user_{source_id}")
-                        or is_ignored_app_user(f"user_{target_id}")
-                    ):
-                        continue
-
-                    source_node = f"user_{source_id}"
-                    target_node = f"user_{target_id}"
-
-                    if not G.has_node(source_node):
-                        G.add_node(
-                            source_node,
-                            type="user",
-                            name=source_name,
-                            label=source_name,
-                        )
-
-                    if not G.has_node(target_node):
-                        G.add_node(
-                            target_node,
-                            type="user",
-                            name=target_name,
-                            label=target_name,
-                        )
-
-                    G.add_edge(
-                        source_node,
-                        target_node,
-                        relation=r.get("relation", "INTERACTION"),
-                        weight=r.get("weight", 1),
-                    )
-
-        clean_graph_nodes(G, source="app")
-        G.remove_nodes_from(list(nx.isolates(G)))
-
-        if G.number_of_nodes() == 0:
-            raise HTTPException(
-                status_code=404,
-                detail="Tidak ada relasi data yang ditemukan di Neo4j.",
-            )
-
-        community_map = apply_leiden_communities(G, weight_attr="weight")
-
-        degree_map = dict(G.degree(weight="weight"))
-        max_degree = max(degree_map.values()) if degree_map else 1
-
-        nodes_output = []
-
-        for node in G.nodes():
-            attr = G.nodes[node].copy()
-            community_id = community_map.get(node, attr.get("community", 0))
-            attr["community"] = community_id
-
-            degree = degree_map.get(node, 0)
-
-            nodes_output.append({
-                "id": node,
-                "community": community_id,
-                "attributes": attr,
-                "metrics": {
-                    "degree": degree / max_degree if max_degree else 0.0,
-                    "raw_degree": degree,
-                    "betweenness": 0.0,
-                    "closeness": 0.0,
-                    "eigenvector": 0.0,
-                    "pagerank": 0.0,
-                },
-            })
-
-        edges_output = []
-
-        for source, target, data in G.edges(data=True):
-            edges_output.append({
-                "source": source,
-                "target": target,
-                "weight": data.get("weight", 1),
-                "attributes": {
-                    "relation": data.get("relation", "INTERACTION"),
-                },
-            })
-
-        return {
-            "message": (
-                f"Graf visualisasi berhasil dibuat "
-                f"(Nodes: {len(nodes_output)}, Edges: {len(edges_output)}, Mode: {mode})."
-            ),
-            "graph_info": {
-                "nodes_count": len(nodes_output),
-                "edges_count": len(edges_output),
-                "communities_count": len(set(community_map.values())),
-                "nodes": nodes_output,
-                "edges": edges_output,
-            },
-        }
-
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-
-        import traceback
-        traceback.print_exc()
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Gagal membuat graf visualisasi Neo4j: {str(e)}",
-        )
-        
+    
 async def visualize_graph_from_neo4j(limit: int = 1000, mode: int = 1):
     try:
         from pyvis.network import Network
