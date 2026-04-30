@@ -20,8 +20,6 @@ from app.utils.leiden_utils import apply_leiden_communities
 
 from app.config import GOOGLE_CREDENTIALS
 
-MASTER_SHEET_ID = "MASUKKAN_ID_SPREADSHEET_DISINI"
-
 def get_gspread_client():
     try:
         scopes = [
