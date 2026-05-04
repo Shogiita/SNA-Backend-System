@@ -126,7 +126,7 @@ def get_gspread_user_client(google_access_token: str):
     if not google_access_token:
         raise HTTPException(
             status_code=401,
-            detail="Google Access Token tidak ditemukan. Silakan login ulang dengan Google.",
+            detail="Google Access Token tidak ditemukan. Silakan logout lalu login ulang dengan Google.",
         )
 
     try:
@@ -137,13 +137,29 @@ def get_gspread_user_client(google_access_token: str):
                 "https://www.googleapis.com/auth/drive.file",
             ],
         )
+
         return gspread.authorize(creds)
+
     except Exception as e:
+        error_message = str(e)
+
+        if (
+            "refresh" in error_message.lower()
+            or "refresh_token" in error_message.lower()
+            or "access token" in error_message.lower()
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Google Access Token sudah expired atau tidak bisa diperbarui. "
+                    "Silakan logout lalu login ulang dengan Google dan izinkan akses Drive/Sheets."
+                ),
+            )
+
         raise HTTPException(
             status_code=401,
-            detail=f"Gagal otentikasi Google user: {str(e)}",
+            detail=f"Gagal otentikasi Google user: {error_message}",
         )
-
 def _parse_to_datetime(value):
     if pd.isna(value) or str(value).strip() == "":
         return pd.NaT
