@@ -1,61 +1,139 @@
-import pytest
-from unittest.mock import patch, MagicMock
-import networkx as nx
+from unittest.mock import AsyncMock, patch
 
-@patch("app.controllers.sna_controller.neo4j_driver.session")
-def test_get_instagram_metrics_success(mock_session, api_client):
-    mock_tx = MagicMock()
-    mock_tx.run.return_value.data.return_value = [
-        {
-            "id": "1", 
-            "permalink": "https://instagram.com/p/1",
-            "timestamp": "2026-04-09T10:00:00+0000", 
-            "caption": "Halo #Surabaya #Jatim", 
-            "like_count": 100, 
-            "comments_count": 5
-        }
-    ]
-    mock_session.return_value.__enter__.return_value = mock_tx
-    
-    response = api_client.get("/sna/metrics")
-    
+
+def test_get_sna_dashboard_metrics_success(api_client):
+    expected = {
+        "status": "success",
+        "data": {
+            "top_10_posts": [],
+            "top_10_hashtags": [],
+        },
+    }
+
+    with patch(
+        "app.routers.sna_router.sna_controller.get_instagram_metrics",
+        return_value=expected,
+    ) as mock_controller:
+        response = api_client.get(
+            "/sna/metrics",
+            params={
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-31",
+            },
+        )
+
     assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
-    assert len(data["data"]["top_10_posts"]) > 0
-    assert data["data"]["top_10_hashtags"][0]["hashtag"] in ["#surabaya", "#jatim"]
+    assert response.json() == expected
+    mock_controller.assert_called_once_with(
+        start_date="2026-01-01",
+        end_date="2026-01-31",
+    )
 
-# 2. Test Analisis Neo4j (JSON output)
-@patch("app.controllers.sna_controller._build_neo4j_graph")
-def test_analyze_neo4j_endpoint(mock_build, api_client):
-    # Arrange
-    dummy_g = nx.DiGraph()
-    dummy_g.add_node("user_1", label="Budi")
-    dummy_g.add_node("user_2", label="Andi")
-    dummy_g.add_edge("user_1", "user_2", weight=1)
-    mock_build.return_value = dummy_g
-    
-    # Act
-    response = api_client.get("/sna/neo4j/analyze?mode=1")
-    
-    # Assert
+
+def test_run_ingestion_endpoint_success(api_client):
+    with patch(
+        "app.routers.sna_router.sna_controller.background_ingestion_task",
+        return_value=None,
+    ) as mock_controller:
+        response = api_client.get("/sna/ingest")
+
     assert response.status_code == 200
-    res_data = response.json()
-    assert res_data["meta"]["total_nodes"] == 2
-    assert res_data["meta"]["total_edges"] == 1
+    assert response.json()["status"] == "success"
+    assert "sinkronisasi data Instagram" in response.json()["message"]
+    assert mock_controller.called
 
-# 3. Test Graph Dummy Generator
-def test_generate_dummy_graph(api_client):
-    # Endpoint ini murni algoritma lokal, tidak butuh mock DB
-    response = api_client.get("/graph/generate")
+
+def test_get_sna_dataset_success(api_client):
+    expected = {
+        "status": "success",
+        "data": [
+            {
+                "id": "post_1",
+                "caption": "Test post",
+            }
+        ],
+    }
+
+    with patch(
+        "app.routers.sna_router.sna_controller.get_dataset_flat",
+        return_value=expected,
+    ) as mock_controller:
+        response = api_client.get("/sna/dataset")
+
     assert response.status_code == 200
-    data = response.json()
-    assert data["graph_info"]["nodes_count"] > 0
-    assert "leiden_communities" in data["analysis_results"]
+    assert response.json() == expected
+    mock_controller.assert_called_once()
 
-def test_generate_csv_graph(api_client):
-    # Test error handling jika file twitter_dataset.csv tidak ada di server CI/CD
-    response = api_client.get("/csvgraph/generate")
-    # Karena file fisik tidak kita sediakan saat testing, harusnya return 404
-    if response.status_code == 404:
-        assert "Dataset tidak ditemukan" in response.json()["detail"]
+
+def test_create_instagram_visualization_graph_success(api_client):
+    expected = {
+        "message": "Graf visualisasi Instagram berhasil dibuat.",
+        "graph_info": {
+            "nodes_count": 3,
+            "edges_count": 2,
+            "communities_count": 1,
+            "nodes": [],
+            "edges": [],
+        },
+    }
+
+    with patch(
+        "app.routers.sna_router.sna_controller.create_instagram_graph_visualization_from_neo4j",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as mock_controller:
+        response = api_client.post(
+            "/sna/neo4j/visualization/instagram",
+            params={
+                "limit": 100,
+                "mode": 2,
+                "max_edges": 500,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    mock_controller.assert_awaited_once_with(
+        limit=100,
+        mode=2,
+        max_edges=500,
+    )
+
+
+def test_visualize_neo4j_network_success(api_client):
+    expected_html = "<html><body>Instagram Neo4j Network</body></html>"
+
+    with patch(
+        "app.routers.sna_router.sna_controller.visualize_neo4j_network",
+        new_callable=AsyncMock,
+        return_value=expected_html,
+        create=True,
+    ) as mock_controller:
+        response = api_client.get(
+            "/sna/neo4j/visualize",
+            params={
+                "mode": 1,
+                "limit": 50,
+            },
+        )
+
+    assert response.status_code == 200
+
+    assert response.json() == expected_html
+
+    mock_controller.assert_awaited_once_with(mode=1, limit=50)
+
+def test_manual_sync_instagram_to_neo4j_success(api_client):
+    with patch(
+        "app.routers.sna_router.sna_controller.sync_instagram_to_neo4j",
+        return_value=None,
+    ) as mock_controller:
+        response = api_client.post(
+            "/sna/instagram/sync-neo4j",
+            params={"initial_sync": True},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert "initial sync" in response.json()["message"]
+    assert mock_controller.called

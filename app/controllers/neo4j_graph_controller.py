@@ -252,61 +252,61 @@ async def create_graph_visualization_from_neo4j(
 
             elif mode == 1:
                 query = """
-                CALL {
+                CALL () {
                     MATCH (u1:FirebaseUser)-[:LIKES_KAWAN_FB]->(p:FirebaseKawanSS)<-[:POSTED_FB]-(u2:FirebaseUser)
                     WHERE u1.id <> u2.id
                     RETURN u1.id AS source_id,
-                           coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
-                           u2.id AS target_id,
-                           coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
-                           1 AS weight,
-                           'LIKE' AS relation
+                        coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
+                        u2.id AS target_id,
+                        coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
+                        1 AS weight,
+                        'LIKE' AS relation
 
                     UNION ALL
 
                     MATCH (u1:FirebaseUser)-[:LIKES_INFO_FB]->(p:FirebaseInfoss)<-[:POSTED_FB]-(u2:FirebaseUser)
                     WHERE u1.id <> u2.id
                     RETURN u1.id AS source_id,
-                           coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
-                           u2.id AS target_id,
-                           coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
-                           1 AS weight,
-                           'LIKE' AS relation
+                        coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
+                        u2.id AS target_id,
+                        coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
+                        1 AS weight,
+                        'LIKE' AS relation
 
                     UNION ALL
 
                     MATCH (u1:FirebaseUser)-[:WROTE_FB]->(c:FirebaseKawanSSComment)-[:COMMENTED_ON_FB]->(p:FirebaseKawanSS)<-[:POSTED_FB]-(u2:FirebaseUser)
                     WHERE u1.id <> u2.id
                     RETURN u1.id AS source_id,
-                           coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
-                           u2.id AS target_id,
-                           coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
-                           3 AS weight,
-                           'COMMENT' AS relation
+                        coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
+                        u2.id AS target_id,
+                        coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
+                        3 AS weight,
+                        'COMMENT' AS relation
 
                     UNION ALL
 
                     MATCH (u1:FirebaseUser)-[:WROTE_FB]->(c:FirebaseInfossComment)-[:COMMENTED_ON_FB]->(p:FirebaseInfoss)<-[:POSTED_FB]-(u2:FirebaseUser)
                     WHERE u1.id <> u2.id
                     RETURN u1.id AS source_id,
-                           coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
-                           u2.id AS target_id,
-                           coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
-                           3 AS weight,
-                           'COMMENT' AS relation
+                        coalesce(u1.nama, u1.username, u1.id, '') AS source_name,
+                        u2.id AS target_id,
+                        coalesce(u2.nama, u2.username, u2.id, '') AS target_name,
+                        3 AS weight,
+                        'COMMENT' AS relation
                 }
                 WITH source_id,
-                     source_name,
-                     target_id,
-                     target_name,
-                     relation,
-                     sum(weight) AS total_weight
+                    source_name,
+                    target_id,
+                    target_name,
+                    relation,
+                    sum(weight) AS total_weight
                 RETURN source_id,
-                       source_name,
-                       target_id,
-                       target_name,
-                       total_weight AS weight,
-                       collect(DISTINCT relation) AS relations
+                    source_name,
+                    target_id,
+                    target_name,
+                    total_weight AS weight,
+                    collect(DISTINCT relation) AS relations
                 ORDER BY weight DESC
                 LIMIT $edge_limit
                 """
@@ -506,53 +506,63 @@ def _build_neo4j_graph_internal(limit: int, mode: int):
     with neo4j_driver.session() as session:
         if mode == 1:
             query = """
-            CALL {
+            CALL () {
                 MATCH (u1:FirebaseUser)-[:LIKES_KAWAN_FB]->(p:FirebaseKawanSS)<-[:POSTED_FB]-(u2:FirebaseUser)
                 WHERE u1.id <> u2.id
                 RETURN u1.id AS source_id,
-                       coalesce(u1.nama, u1.username, u1.id, 'Unknown') AS source_name,
-                       u2.id AS target_id,
-                       coalesce(u2.nama, u2.username, u2.id, 'Unknown') AS target_name,
-                       1 AS w,
-                       'LIKE' AS t
+                    coalesce(u1.nama, u1.username, u1.id, 'Unknown') AS source_name,
+                    u2.id AS target_id,
+                    coalesce(u2.nama, u2.username, u2.id, 'Unknown') AS target_name,
+                    1 AS w,
+                    'LIKE' AS t
 
                 UNION ALL
 
                 MATCH (u1:FirebaseUser)-[:LIKES_INFO_FB]->(p:FirebaseInfoss)<-[:POSTED_FB]-(u2:FirebaseUser)
                 WHERE u1.id <> u2.id
                 RETURN u1.id AS source_id,
-                       coalesce(u1.nama, u1.username, u1.id, 'Unknown') AS source_name,
-                       u2.id AS target_id,
-                       coalesce(u2.nama, u2.username, u2.id, 'Unknown') AS target_name,
-                       1 AS w,
-                       'LIKE' AS t
+                    coalesce(u1.nama, u1.username, u1.id, 'Unknown') AS source_name,
+                    u2.id AS target_id,
+                    coalesce(u2.nama, u2.username, u2.id, 'Unknown') AS target_name,
+                    1 AS w,
+                    'LIKE' AS t
 
                 UNION ALL
 
                 MATCH (u1:FirebaseUser)-[:WROTE_FB]->(c:FirebaseKawanSSComment)-[:COMMENTED_ON_FB]->(p:FirebaseKawanSS)<-[:POSTED_FB]-(u2:FirebaseUser)
                 WHERE u1.id <> u2.id
                 RETURN u1.id AS source_id,
-                       coalesce(u1.nama, u1.username, u1.id, 'Unknown') AS source_name,
-                       u2.id AS target_id,
-                       coalesce(u2.nama, u2.username, u2.id, 'Unknown') AS target_name,
-                       3 AS w,
-                       'COMMENT' AS t
+                    coalesce(u1.nama, u1.username, u1.id, 'Unknown') AS source_name,
+                    u2.id AS target_id,
+                    coalesce(u2.nama, u2.username, u2.id, 'Unknown') AS target_name,
+                    3 AS w,
+                    'COMMENT' AS t
 
                 UNION ALL
 
                 MATCH (u1:FirebaseUser)-[:WROTE_FB]->(c:FirebaseInfossComment)-[:COMMENTED_ON_FB]->(p:FirebaseInfoss)<-[:POSTED_FB]-(u2:FirebaseUser)
                 WHERE u1.id <> u2.id
                 RETURN u1.id AS source_id,
-                       coalesce(u1.nama, u1.username, u1.id, 'Unknown') AS source_name,
-                       u2.id AS target_id,
-                       coalesce(u2.nama, u2.username, u2.id, 'Unknown') AS target_name,
-                       3 AS w,
-                       'COMMENT' AS t
+                    coalesce(u1.nama, u1.username, u1.id, 'Unknown') AS source_name,
+                    u2.id AS target_id,
+                    coalesce(u2.nama, u2.username, u2.id, 'Unknown') AS target_name,
+                    3 AS w,
+                    'COMMENT' AS t
             }
-            WITH source_id, source_name, target_id, target_name, sum(w) AS total_weight, collect(DISTINCT t) AS rel_types
+            WITH source_id,
+                source_name,
+                target_id,
+                target_name,
+                sum(w) AS total_weight,
+                collect(DISTINCT t) AS rel_types
+            RETURN source_id,
+                source_name,
+                target_id,
+                target_name,
+                total_weight AS weight,
+                rel_types
             ORDER BY total_weight DESC
             LIMIT $limit
-            RETURN source_id, source_name, target_id, target_name, total_weight AS weight, rel_types
             """
 
             records = session.run(query, limit=limit).data()

@@ -8,6 +8,7 @@ import itertools
 import random
 import time
 import calendar
+import traceback
 from dateutil import parser
 from datetime import datetime, timezone, timedelta
 import networkx as nx
@@ -292,7 +293,7 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
         }
 
     except Exception as e:
-        traceback.print_exc()
+        # traceback.print_exc()
         return {
             "status": "error",
             "message": str(e)
@@ -752,7 +753,6 @@ def get_network_metrics_summary(source: str = "app"):
         }
 
     except Exception as e:
-        import traceback
         traceback.print_exc()
 
         return {
@@ -819,56 +819,846 @@ def get_live_analytics_summary():
         return {"status": "error", "message": str(e)}
 
 def get_stats_summary():
+    """
+    Dashboard stats + monthly report summary.
+
+    Struktur utama tetap:
+    {
+        status,
+        data: {
+            users: {...},
+            posts: {...}
+        }
+    }
+
+    Query sudah menggunakan CALL () { ... } agar tidak terkena warning deprecated Neo4j.
+    """
+
     try:
         now = datetime.now()
-        iso_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
-        iso_last_month = get_first_day_of_last_month(now).isoformat()
-        iso_30_days_ago = (now - timedelta(days=30)).isoformat()
-        epoch_30_days_ago = int((now - timedelta(days=30)).timestamp() * 1000)
 
-        # Query mutlak hanya membaca data Firebase (Suara Surabaya Mobile)
+        this_month_start = now.replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        last_month_end = this_month_start - timedelta(seconds=1)
+        last_month_start = last_month_end.replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        last_30_days_start = now - timedelta(days=30)
+
+        this_month_start_epoch = int(this_month_start.timestamp() * 1000)
+        now_epoch = int(now.timestamp() * 1000)
+
+        last_month_start_epoch = int(last_month_start.timestamp() * 1000)
+        last_month_end_epoch = int(last_month_end.timestamp() * 1000)
+
+        last_30_days_epoch = int(last_30_days_start.timestamp() * 1000)
+
+        this_month_start_iso = this_month_start.isoformat()
+        now_iso = now.isoformat()
+
+        last_month_start_iso = last_month_start.isoformat()
+        last_month_end_iso = last_month_end.isoformat()
+
+        last_30_days_iso = last_30_days_start.isoformat()
+
+        now_ig = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
+        last_30_days_ig = last_30_days_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
+
         query = """
-        CALL { MATCH (u:FirebaseUser) RETURN count(u) AS total_users }
-        CALL { MATCH (i:FirebaseInfoss) RETURN count(i) AS total_infoss }
-        CALL { MATCH (k:FirebaseKawanSS) RETURN count(k) AS total_kawanss }
-        CALL { MATCH (u:FirebaseUser) WHERE u.createdAt >= $iso_this_month OR u.joinDate >= $iso_this_month RETURN count(u) AS new_users_this_month }
-        CALL { MATCH (u:FirebaseUser) WHERE (u.createdAt >= $iso_last_month AND u.createdAt < $iso_this_month) OR (u.joinDate >= $iso_last_month AND u.joinDate < $iso_this_month) RETURN count(u) AS new_users_last_month }
-        CALL { MATCH (k:FirebaseKawanSS) WHERE (k.isDeleted = false OR k.isDeleted IS NULL) AND k.createdAt >= $epoch_30_days_ago RETURN count(k) AS new_kawanss_30_days }
-        CALL { MATCH (i:FirebaseInfoss) WHERE (i.isDeleted = false OR i.isDeleted IS NULL) AND (i.uploadDate >= $iso_30_days_ago OR i.createdAt >= $iso_30_days_ago) RETURN count(i) AS new_infoss_30_days }
-        RETURN total_users, total_infoss, total_kawanss, new_users_this_month, new_users_last_month, new_infoss_30_days, new_kawanss_30_days
+        CALL () {
+            MATCH (u:FirebaseUser)
+            RETURN count(u) AS total_users
+        }
+
+        CALL () {
+            MATCH (u:FirebaseUser)
+            WHERE
+                (
+                    u.createdAt IS NOT NULL
+                    AND u.createdAt >= $this_month_start_epoch
+                    AND u.createdAt <= $now_epoch
+                )
+                OR
+                (
+                    u.createdAt IS NOT NULL
+                    AND toString(u.createdAt) >= $this_month_start_iso
+                    AND toString(u.createdAt) <= $now_iso
+                )
+                OR
+                (
+                    u.tglRegister IS NOT NULL
+                    AND toString(u.tglRegister) >= $this_month_start_iso
+                    AND toString(u.tglRegister) <= $now_iso
+                )
+                OR
+                (
+                    u.registerDate IS NOT NULL
+                    AND toString(u.registerDate) >= $this_month_start_iso
+                    AND toString(u.registerDate) <= $now_iso
+                )
+            RETURN count(u) AS new_users_this_month
+        }
+
+        CALL () {
+            MATCH (u:FirebaseUser)
+            WHERE
+                (
+                    u.createdAt IS NOT NULL
+                    AND u.createdAt >= $last_month_start_epoch
+                    AND u.createdAt <= $last_month_end_epoch
+                )
+                OR
+                (
+                    u.createdAt IS NOT NULL
+                    AND toString(u.createdAt) >= $last_month_start_iso
+                    AND toString(u.createdAt) <= $last_month_end_iso
+                )
+                OR
+                (
+                    u.tglRegister IS NOT NULL
+                    AND toString(u.tglRegister) >= $last_month_start_iso
+                    AND toString(u.tglRegister) <= $last_month_end_iso
+                )
+                OR
+                (
+                    u.registerDate IS NOT NULL
+                    AND toString(u.registerDate) >= $last_month_start_iso
+                    AND toString(u.registerDate) <= $last_month_end_iso
+                )
+            RETURN count(u) AS new_users_last_month
+        }
+
+        CALL () {
+            MATCH (p:FirebaseInfoss)
+            WHERE p.isDeleted = false OR p.isDeleted IS NULL
+            RETURN count(p) AS total_posts
+        }
+
+        CALL () {
+            MATCH (p:FirebaseInfoss)
+            WHERE (p.isDeleted = false OR p.isDeleted IS NULL)
+              AND (
+                    (
+                        p.createdAt IS NOT NULL
+                        AND p.createdAt >= $last_30_days_epoch
+                        AND p.createdAt <= $now_epoch
+                    )
+                    OR
+                    (
+                        p.uploadDate IS NOT NULL
+                        AND toString(p.uploadDate) >= $last_30_days_iso
+                        AND toString(p.uploadDate) <= $now_iso
+                    )
+                    OR
+                    (
+                        p.createdAt IS NOT NULL
+                        AND toString(p.createdAt) >= $last_30_days_iso
+                        AND toString(p.createdAt) <= $now_iso
+                    )
+              )
+            RETURN count(p) AS new_30_days_posts
+        }
+
+        CALL () {
+            MATCH (p:FirebaseKawanSS)
+            WHERE p.isDeleted = false OR p.isDeleted IS NULL
+            RETURN count(p) AS total_kawan_ss
+        }
+
+        CALL () {
+            MATCH (p:FirebaseKawanSS)
+            WHERE (p.isDeleted = false OR p.isDeleted IS NULL)
+              AND (
+                    (
+                        p.createdAt IS NOT NULL
+                        AND p.createdAt >= $last_30_days_epoch
+                        AND p.createdAt <= $now_epoch
+                    )
+                    OR
+                    (
+                        p.createdAt IS NOT NULL
+                        AND toString(p.createdAt) >= $last_30_days_iso
+                        AND toString(p.createdAt) <= $now_iso
+                    )
+              )
+            RETURN count(p) AS new_30_days_kawanss
+        }
+
+        CALL () {
+            MATCH (p:InstagramPost)
+            RETURN count(p) AS total_instagram_posts
+        }
+
+        CALL () {
+            MATCH (p:InstagramPost)
+            WHERE p.timestamp IS NOT NULL
+              AND p.timestamp >= $last_30_days_ig
+              AND p.timestamp <= $now_ig
+            RETURN count(p) AS new_30_days_instagram_posts
+        }
+
+        CALL () {
+            MATCH (u:InstagramUser)
+            RETURN count(u) AS total_instagram_users
+        }
+
+        CALL () {
+            MATCH (c)
+            WHERE c:FirebaseKawanSSComment OR c:FirebaseInfossComment
+            RETURN count(c) AS total_app_comments
+        }
+
+        CALL () {
+            MATCH (c:InstagramComment)
+            RETURN count(c) AS total_instagram_comments
+        }
+
+        CALL () {
+            MATCH ()-[r]->()
+            WHERE type(r) IN ['LIKES_KAWAN_FB', 'LIKES_INFO_FB']
+            RETURN count(r) AS total_app_likes
+        }
+
+        CALL () {
+            MATCH ()-[r]->()
+            WHERE type(r) IN [
+                'POSTED_FB',
+                'WROTE_FB',
+                'COMMENTED_ON_FB',
+                'LIKES_KAWAN_FB',
+                'LIKES_INFO_FB'
+            ]
+            RETURN count(r) AS total_app_interactions
+        }
+
+        CALL () {
+            MATCH ()-[r]->()
+            WHERE type(r) IN [
+                'POSTED_IG',
+                'WROTE_IG',
+                'COMMENTED_ON_IG',
+                'REPLIED_TO_IG'
+            ]
+            RETURN count(r) AS total_instagram_interactions
+        }
+
+        RETURN total_users,
+               new_users_this_month,
+               new_users_last_month,
+               total_posts,
+               new_30_days_posts,
+               total_kawan_ss,
+               new_30_days_kawanss,
+               total_instagram_posts,
+               new_30_days_instagram_posts,
+               total_instagram_users,
+               total_app_comments,
+               total_instagram_comments,
+               total_app_likes,
+               total_app_interactions,
+               total_instagram_interactions
         """
-        
+
         with neo4j_driver.session() as session:
-            res = session.run(
-                query, 
-                iso_this_month=iso_this_month, 
-                iso_last_month=iso_last_month, 
-                iso_30_days_ago=iso_30_days_ago, 
-                epoch_30_days_ago=epoch_30_days_ago
+            result = session.run(
+                query,
+                this_month_start_epoch=this_month_start_epoch,
+                now_epoch=now_epoch,
+                last_month_start_epoch=last_month_start_epoch,
+                last_month_end_epoch=last_month_end_epoch,
+                last_30_days_epoch=last_30_days_epoch,
+                this_month_start_iso=this_month_start_iso,
+                now_iso=now_iso,
+                last_month_start_iso=last_month_start_iso,
+                last_month_end_iso=last_month_end_iso,
+                last_30_days_iso=last_30_days_iso,
+                now_ig=now_ig,
+                last_30_days_ig=last_30_days_ig,
             ).single()
 
-        new_this_month = res["new_users_this_month"]
-        new_last_month = res["new_users_last_month"]
-        growth = (new_this_month / new_last_month) * 100 if new_last_month > 0 else (100.0 if new_this_month > 0 else 0.0)
+        if not result:
+            raise RuntimeError("Query statistik tidak mengembalikan data.")
+
+        total_users = int(result.get("total_users", 0))
+        new_users_this_month = int(result.get("new_users_this_month", 0))
+        new_users_last_month = int(result.get("new_users_last_month", 0))
+
+        total_posts = int(result.get("total_posts", 0))
+        new_30_days_posts = int(result.get("new_30_days_posts", 0))
+
+        total_kawan_ss = int(result.get("total_kawan_ss", 0))
+        new_30_days_kawanss = int(result.get("new_30_days_kawanss", 0))
+
+        total_instagram_posts = int(result.get("total_instagram_posts", 0))
+        new_30_days_instagram_posts = int(result.get("new_30_days_instagram_posts", 0))
+        total_instagram_users = int(result.get("total_instagram_users", 0))
+
+        total_app_comments = int(result.get("total_app_comments", 0))
+        total_instagram_comments = int(result.get("total_instagram_comments", 0))
+        total_app_likes = int(result.get("total_app_likes", 0))
+
+        total_app_interactions = int(result.get("total_app_interactions", 0))
+        total_instagram_interactions = int(result.get("total_instagram_interactions", 0))
+
+        if new_users_last_month > 0:
+            growth_percentage = round(
+                ((new_users_this_month - new_users_last_month) / new_users_last_month) * 100,
+                2
+            )
+        elif new_users_this_month > 0:
+            growth_percentage = 100.0
+        else:
+            growth_percentage = 0.0
+
+        total_comments = total_app_comments + total_instagram_comments
+        total_interactions = total_app_interactions + total_instagram_interactions
+        total_all_posts = total_posts + total_kawan_ss + total_instagram_posts
 
         return {
-            "status": "success", 
+            "status": "success",
             "data": {
                 "users": {
-                    "total": res["total_users"], 
-                    "new_this_month": new_this_month, 
-                    "new_last_month": new_last_month, 
-                    "growth_percentage": round(growth, 2)
+                    "total": total_users,
+                    "new_this_month": new_users_this_month,
+                    "new_last_month": new_users_last_month,
+                    "growth_percentage": growth_percentage,
                 },
                 "posts": {
-                    "total": res["total_infoss"], 
-                    "new_30_days": res["new_infoss_30_days"], 
-                    "total_kawn_ss": res["total_kawanss"], 
-                    "new_30_days_kawanss": res["new_kawanss_30_days"]
+                    "total": total_posts,
+                    "new_30_days": new_30_days_posts,
+                    "total_kawn_ss": total_kawan_ss,
+                    "new_30_days_kawanss": new_30_days_kawanss,
+                },
+                "monthly_report": {
+                    "period": {
+                        "this_month_start": this_month_start.strftime("%Y-%m-%d"),
+                        "last_month_start": last_month_start.strftime("%Y-%m-%d"),
+                        "last_month_end": last_month_end.strftime("%Y-%m-%d"),
+                        "last_30_days_start": last_30_days_start.strftime("%Y-%m-%d"),
+                        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                    "users": {
+                        "app_total": total_users,
+                        "instagram_total": total_instagram_users,
+                        "combined_total": total_users + total_instagram_users,
+                        "new_this_month": new_users_this_month,
+                        "new_last_month": new_users_last_month,
+                        "growth_percentage": growth_percentage,
+                    },
+                    "posts": {
+                        "infoss_total": total_posts,
+                        "infoss_new_30_days": new_30_days_posts,
+                        "kawan_ss_total": total_kawan_ss,
+                        "kawan_ss_new_30_days": new_30_days_kawanss,
+                        "instagram_total": total_instagram_posts,
+                        "instagram_new_30_days": new_30_days_instagram_posts,
+                        "combined_total": total_all_posts,
+                    },
+                    "comments": {
+                        "app_total": total_app_comments,
+                        "instagram_total": total_instagram_comments,
+                        "combined_total": total_comments,
+                    },
+                    "likes": {
+                        "app_total": total_app_likes,
+                    },
+                    "interactions": {
+                        "app_total": total_app_interactions,
+                        "instagram_total": total_instagram_interactions,
+                        "combined_total": total_interactions,
+                    },
+                    "summary_cards": [
+                        {
+                            "title": "Total Users",
+                            "value": total_users + total_instagram_users,
+                            "description": "Total pengguna aplikasi dan Instagram yang tersimpan dalam Neo4j",
+                        },
+                        {
+                            "title": "New Users This Month",
+                            "value": new_users_this_month,
+                            "description": "Jumlah pengguna aplikasi baru pada bulan berjalan",
+                        },
+                        {
+                            "title": "Total Posts",
+                            "value": total_all_posts,
+                            "description": "Total konten Infoss, Kawan SS, dan Instagram",
+                        },
+                        {
+                            "title": "Total Interactions",
+                            "value": total_interactions,
+                            "description": "Total relasi interaksi aplikasi dan Instagram",
+                        },
+                    ],
+                },
+            },
+        }
+
+    except Exception as e:
+        traceback.print_exc()
+
+        return {
+            "status": "error",
+            "message": str(e),
+            "data": {
+                "users": {
+                    "total": 0,
+                    "new_this_month": 0,
+                    "new_last_month": 0,
+                    "growth_percentage": 0.0,
+                },
+                "posts": {
+                    "total": 0,
+                    "new_30_days": 0,
+                    "total_kawn_ss": 0,
+                    "new_30_days_kawanss": 0,
+                },
+                "monthly_report": {},
+            },
+        }
+    """
+    Dashboard stats + monthly report summary.
+
+    Struktur utama tetap:
+    {
+        status,
+        data: {
+            users: {...},
+            posts: {...}
+        }
+    }
+
+    Tambahan monthly report dimasukkan ke:
+    data.monthly_report
+    """
+
+    try:
+        now = datetime.now()
+
+        # Bulan ini
+        this_month_start = now.replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        # Bulan lalu
+        last_month_end = this_month_start - timedelta(seconds=1)
+        last_month_start = last_month_end.replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        # 30 hari terakhir
+        last_30_days_start = now - timedelta(days=30)
+
+        # Format epoch millisecond untuk data Firebase yang pakai createdAt angka
+        this_month_start_epoch = int(this_month_start.timestamp() * 1000)
+        now_epoch = int(now.timestamp() * 1000)
+
+        last_month_start_epoch = int(last_month_start.timestamp() * 1000)
+        last_month_end_epoch = int(last_month_end.timestamp() * 1000)
+
+        last_30_days_epoch = int(last_30_days_start.timestamp() * 1000)
+
+        # Format ISO string untuk data yang pakai uploadDate / createdAt string
+        this_month_start_iso = this_month_start.isoformat()
+        now_iso = now.isoformat()
+
+        last_month_start_iso = last_month_start.isoformat()
+        last_month_end_iso = last_month_end.isoformat()
+
+        last_30_days_iso = last_30_days_start.isoformat()
+
+        # Format Instagram timestamp: 2026-04-29T14:58:55+0000
+        this_month_start_ig = this_month_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
+        now_ig = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+        last_30_days_ig = last_30_days_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+        query = """
+        CALL {
+            MATCH (u:FirebaseUser)
+            RETURN count(u) AS total_users
+        }
+
+        CALL {
+            MATCH (u:FirebaseUser)
+            WHERE
+                (
+                    u.createdAt IS NOT NULL
+                    AND u.createdAt >= $this_month_start_epoch
+                    AND u.createdAt <= $now_epoch
+                )
+                OR
+                (
+                    u.createdAt IS NOT NULL
+                    AND toString(u.createdAt) >= $this_month_start_iso
+                    AND toString(u.createdAt) <= $now_iso
+                )
+                OR
+                (
+                    u.tglRegister IS NOT NULL
+                    AND toString(u.tglRegister) >= $this_month_start_iso
+                    AND toString(u.tglRegister) <= $now_iso
+                )
+                OR
+                (
+                    u.registerDate IS NOT NULL
+                    AND toString(u.registerDate) >= $this_month_start_iso
+                    AND toString(u.registerDate) <= $now_iso
+                )
+            RETURN count(u) AS new_users_this_month
+        }
+
+        CALL {
+            MATCH (u:FirebaseUser)
+            WHERE
+                (
+                    u.createdAt IS NOT NULL
+                    AND u.createdAt >= $last_month_start_epoch
+                    AND u.createdAt <= $last_month_end_epoch
+                )
+                OR
+                (
+                    u.createdAt IS NOT NULL
+                    AND toString(u.createdAt) >= $last_month_start_iso
+                    AND toString(u.createdAt) <= $last_month_end_iso
+                )
+                OR
+                (
+                    u.tglRegister IS NOT NULL
+                    AND toString(u.tglRegister) >= $last_month_start_iso
+                    AND toString(u.tglRegister) <= $last_month_end_iso
+                )
+                OR
+                (
+                    u.registerDate IS NOT NULL
+                    AND toString(u.registerDate) >= $last_month_start_iso
+                    AND toString(u.registerDate) <= $last_month_end_iso
+                )
+            RETURN count(u) AS new_users_last_month
+        }
+
+        CALL {
+            MATCH (p:FirebaseInfoss)
+            WHERE p.isDeleted = false OR p.isDeleted IS NULL
+            RETURN count(p) AS total_posts
+        }
+
+        CALL {
+            MATCH (p:FirebaseInfoss)
+            WHERE (p.isDeleted = false OR p.isDeleted IS NULL)
+              AND (
+                    (
+                        p.createdAt IS NOT NULL
+                        AND p.createdAt >= $last_30_days_epoch
+                        AND p.createdAt <= $now_epoch
+                    )
+                    OR
+                    (
+                        p.uploadDate IS NOT NULL
+                        AND toString(p.uploadDate) >= $last_30_days_iso
+                        AND toString(p.uploadDate) <= $now_iso
+                    )
+                    OR
+                    (
+                        p.createdAt IS NOT NULL
+                        AND toString(p.createdAt) >= $last_30_days_iso
+                        AND toString(p.createdAt) <= $now_iso
+                    )
+              )
+            RETURN count(p) AS new_30_days_posts
+        }
+
+        CALL {
+            MATCH (p:FirebaseKawanSS)
+            WHERE p.isDeleted = false OR p.isDeleted IS NULL
+            RETURN count(p) AS total_kawan_ss
+        }
+
+        CALL {
+            MATCH (p:FirebaseKawanSS)
+            WHERE (p.isDeleted = false OR p.isDeleted IS NULL)
+              AND (
+                    (
+                        p.createdAt IS NOT NULL
+                        AND p.createdAt >= $last_30_days_epoch
+                        AND p.createdAt <= $now_epoch
+                    )
+                    OR
+                    (
+                        p.createdAt IS NOT NULL
+                        AND toString(p.createdAt) >= $last_30_days_iso
+                        AND toString(p.createdAt) <= $now_iso
+                    )
+              )
+            RETURN count(p) AS new_30_days_kawanss
+        }
+
+        CALL {
+            MATCH (p:InstagramPost)
+            RETURN count(p) AS total_instagram_posts
+        }
+
+        CALL {
+            MATCH (p:InstagramPost)
+            WHERE p.timestamp IS NOT NULL
+              AND p.timestamp >= $last_30_days_ig
+              AND p.timestamp <= $now_ig
+            RETURN count(p) AS new_30_days_instagram_posts
+        }
+
+        CALL {
+            MATCH (u:InstagramUser)
+            RETURN count(u) AS total_instagram_users
+        }
+
+        CALL {
+            MATCH (c)
+            WHERE c:FirebaseKawanSSComment OR c:FirebaseInfossComment
+            RETURN count(c) AS total_app_comments
+        }
+
+        CALL {
+            MATCH (c:InstagramComment)
+            RETURN count(c) AS total_instagram_comments
+        }
+
+        CALL {
+            MATCH ()-[r]->()
+            WHERE type(r) IN ['LIKES_KAWAN_FB', 'LIKES_INFO_FB']
+            RETURN count(r) AS total_app_likes
+        }
+
+        CALL {
+            MATCH ()-[r]->()
+            WHERE type(r) IN [
+                'POSTED_FB',
+                'WROTE_FB',
+                'COMMENTED_ON_FB',
+                'LIKES_KAWAN_FB',
+                'LIKES_INFO_FB'
+            ]
+            RETURN count(r) AS total_app_interactions
+        }
+
+        CALL {
+            MATCH ()-[r]->()
+            WHERE type(r) IN [
+                'POSTED_IG',
+                'WROTE_IG',
+                'COMMENTED_ON_IG',
+                'REPLIED_TO_IG'
+            ]
+            RETURN count(r) AS total_instagram_interactions
+        }
+
+        RETURN total_users,
+               new_users_this_month,
+               new_users_last_month,
+               total_posts,
+               new_30_days_posts,
+               total_kawan_ss,
+               new_30_days_kawanss,
+               total_instagram_posts,
+               new_30_days_instagram_posts,
+               total_instagram_users,
+               total_app_comments,
+               total_instagram_comments,
+               total_app_likes,
+               total_app_interactions,
+               total_instagram_interactions
+        """
+
+        with neo4j_driver.session() as session:
+            result = session.run(
+                query,
+                this_month_start_epoch=this_month_start_epoch,
+                now_epoch=now_epoch,
+                last_month_start_epoch=last_month_start_epoch,
+                last_month_end_epoch=last_month_end_epoch,
+                last_30_days_epoch=last_30_days_epoch,
+                this_month_start_iso=this_month_start_iso,
+                now_iso=now_iso,
+                last_month_start_iso=last_month_start_iso,
+                last_month_end_iso=last_month_end_iso,
+                last_30_days_iso=last_30_days_iso,
+                this_month_start_ig=this_month_start_ig,
+                now_ig=now_ig,
+                last_30_days_ig=last_30_days_ig,
+            ).single()
+
+        if not result:
+            return {
+                "status": "success",
+                "data": {
+                    "users": {
+                        "total": 0,
+                        "new_this_month": 0,
+                        "new_last_month": 0,
+                        "growth_percentage": 0.0
+                    },
+                    "posts": {
+                        "total": 0,
+                        "new_30_days": 0,
+                        "total_kawn_ss": 0,
+                        "new_30_days_kawanss": 0
+                    },
+                    "monthly_report": {}
+                }
+            }
+
+        total_users = int(result.get("total_users", 0))
+        new_users_this_month = int(result.get("new_users_this_month", 0))
+        new_users_last_month = int(result.get("new_users_last_month", 0))
+
+        total_posts = int(result.get("total_posts", 0))
+        new_30_days_posts = int(result.get("new_30_days_posts", 0))
+
+        total_kawan_ss = int(result.get("total_kawan_ss", 0))
+        new_30_days_kawanss = int(result.get("new_30_days_kawanss", 0))
+
+        total_instagram_posts = int(result.get("total_instagram_posts", 0))
+        new_30_days_instagram_posts = int(result.get("new_30_days_instagram_posts", 0))
+
+        total_instagram_users = int(result.get("total_instagram_users", 0))
+
+        total_app_comments = int(result.get("total_app_comments", 0))
+        total_instagram_comments = int(result.get("total_instagram_comments", 0))
+
+        total_app_likes = int(result.get("total_app_likes", 0))
+
+        total_app_interactions = int(result.get("total_app_interactions", 0))
+        total_instagram_interactions = int(result.get("total_instagram_interactions", 0))
+
+        if new_users_last_month > 0:
+            growth_percentage = round(
+                ((new_users_this_month - new_users_last_month) / new_users_last_month) * 100,
+                2
+            )
+        elif new_users_this_month > 0:
+            growth_percentage = 100.0
+        else:
+            growth_percentage = 0.0
+
+        total_comments = total_app_comments + total_instagram_comments
+        total_interactions = total_app_interactions + total_instagram_interactions
+        total_all_posts = total_posts + total_kawan_ss + total_instagram_posts
+
+        return {
+            "status": "success",
+            "data": {
+                "users": {
+                    "total": total_users,
+                    "new_this_month": new_users_this_month,
+                    "new_last_month": new_users_last_month,
+                    "growth_percentage": growth_percentage
+                },
+                "posts": {
+                    "total": total_posts,
+                    "new_30_days": new_30_days_posts,
+                    "total_kawn_ss": total_kawan_ss,
+                    "new_30_days_kawanss": new_30_days_kawanss
+                },
+                "monthly_report": {
+                    "period": {
+                        "this_month_start": this_month_start.strftime("%Y-%m-%d"),
+                        "last_month_start": last_month_start.strftime("%Y-%m-%d"),
+                        "last_month_end": last_month_end.strftime("%Y-%m-%d"),
+                        "last_30_days_start": last_30_days_start.strftime("%Y-%m-%d"),
+                        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S")
+                    },
+                    "users": {
+                        "app_total": total_users,
+                        "instagram_total": total_instagram_users,
+                        "combined_total": total_users + total_instagram_users,
+                        "new_this_month": new_users_this_month,
+                        "new_last_month": new_users_last_month,
+                        "growth_percentage": growth_percentage
+                    },
+                    "posts": {
+                        "infoss_total": total_posts,
+                        "infoss_new_30_days": new_30_days_posts,
+                        "kawan_ss_total": total_kawan_ss,
+                        "kawan_ss_new_30_days": new_30_days_kawanss,
+                        "instagram_total": total_instagram_posts,
+                        "instagram_new_30_days": new_30_days_instagram_posts,
+                        "combined_total": total_all_posts
+                    },
+                    "comments": {
+                        "app_total": total_app_comments,
+                        "instagram_total": total_instagram_comments,
+                        "combined_total": total_comments
+                    },
+                    "likes": {
+                        "app_total": total_app_likes
+                    },
+                    "interactions": {
+                        "app_total": total_app_interactions,
+                        "instagram_total": total_instagram_interactions,
+                        "combined_total": total_interactions
+                    },
+                    "summary_cards": [
+                        {
+                            "title": "Total Users",
+                            "value": total_users + total_instagram_users,
+                            "description": "Total pengguna aplikasi dan Instagram yang tersimpan dalam Neo4j"
+                        },
+                        {
+                            "title": "New Users This Month",
+                            "value": new_users_this_month,
+                            "description": "Jumlah pengguna aplikasi baru pada bulan berjalan"
+                        },
+                        {
+                            "title": "Total Posts",
+                            "value": total_all_posts,
+                            "description": "Total konten Infoss, Kawan SS, dan Instagram"
+                        },
+                        {
+                            "title": "Total Interactions",
+                            "value": total_interactions,
+                            "description": "Total relasi interaksi aplikasi dan Instagram"
+                        }
+                    ]
                 }
             }
         }
+
     except Exception as e:
-        import traceback
         traceback.print_exc()
-        return {"status": "error", "message": str(e)}
+
+        return {
+            "status": "error",
+            "message": str(e),
+            "data": {
+                "users": {
+                    "total": 0,
+                    "new_this_month": 0,
+                    "new_last_month": 0,
+                    "growth_percentage": 0.0
+                },
+                "posts": {
+                    "total": 0,
+                    "new_30_days": 0,
+                    "total_kawn_ss": 0,
+                    "new_30_days_kawanss": 0
+                },
+                "monthly_report": {}
+            }
+        }

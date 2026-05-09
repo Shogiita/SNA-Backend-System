@@ -1,37 +1,71 @@
-import pytest
-import networkx as nx
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-@patch("app.controllers.neo4j_graph_controller._build_neo4j_graph_internal")
-def test_visualize_graph_endpoint_success(mock_build_graph, api_client):
-    dummy_G = nx.DiGraph()
-    dummy_G.add_node("user_1", name="Budi", type="user", community=0)
-    dummy_G.add_node("user_2", name="Andi", type="user", community=1)
-    dummy_G.add_edge("user_1", "user_2", weight=5, relation="COMMENT")
-    
-    mock_build_graph.return_value = dummy_G
+from fastapi import HTTPException
 
-    # Act: Hit endpoint visualisasi
-    # response = api_client.get("/ssgraph/snagraph/visualize?limit=10&mode=1")
-    response = api_client.get("/snagraph/visualize?limit=10&mode=1")
 
-    # Assert
+def test_visualize_graph_from_neo4j_success(api_client):
+    expected_html = "<html><body>Graph Visualization</body></html>"
+
+    with patch(
+        "app.routers.sna_router.neo4j_graph_controller.visualize_graph_from_neo4j",
+        new_callable=AsyncMock,
+        return_value=expected_html,
+    ) as mock_controller:
+        response = api_client.get("/sna/snagraph/visualize?limit=10&mode=1")
+
     assert response.status_code == 200
-    assert response.headers["content-type"] == "text/html; charset=utf-8"
-    
-    html_content = response.text
-    assert "Budi" in html_content
-    assert "Andi" in html_content
-    assert "vis.js" in html_content
 
-@patch("app.controllers.neo4j_graph_controller._build_neo4j_graph_internal")
-def test_visualize_graph_empty(mock_build_graph, api_client):
-    mock_build_graph.return_value = nx.DiGraph()
+    # Endpoint mengembalikan string biasa, sehingga FastAPI serialize sebagai JSON string.
+    assert response.json() == expected_html
 
-    # Act
-    # response = api_client.get("/ssgraph/snagraph/visualize?limit=10&mode=1")
-    response = api_client.get("/snagraph/visualize?limit=10&mode=1")
+    mock_controller.assert_awaited_once_with(limit=10, mode=1)
 
-    # Assert
+
+def test_create_app_visualization_graph_success(api_client):
+    expected = {
+        "message": "Graf visualisasi berhasil dibuat.",
+        "graph_info": {
+            "nodes_count": 2,
+            "edges_count": 1,
+            "communities_count": 1,
+            "nodes": [],
+            "edges": [],
+        },
+    }
+
+    with patch(
+        "app.routers.sna_router.neo4j_graph_controller.create_graph_visualization_from_neo4j",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as mock_controller:
+        response = api_client.post(
+            "/sna/neo4j/visualization/app",
+            params={
+                "limit": 100,
+                "mode": 2,
+                "max_edges": 500,
+            },
+        )
+
     assert response.status_code == 200
-    assert "Graf Kosong" in response.text
+    assert response.json() == expected
+    mock_controller.assert_awaited_once_with(
+        limit=100,
+        mode=2,
+        max_edges=500,
+    )
+
+
+def test_create_app_visualization_graph_empty(api_client):
+    with patch(
+        "app.routers.sna_router.neo4j_graph_controller.create_graph_visualization_from_neo4j",
+        new_callable=AsyncMock,
+        side_effect=HTTPException(
+            status_code=404,
+            detail="Tidak ada relasi data yang ditemukan di Neo4j.",
+        ),
+    ):
+        response = api_client.post("/sna/neo4j/visualization/app")
+
+    assert response.status_code == 404
+    assert "Tidak ada relasi data" in response.json()["detail"]

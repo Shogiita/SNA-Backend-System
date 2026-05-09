@@ -49,9 +49,13 @@ async def create_instagram_graph_visualization_from_neo4j(
     max_edges: int = 25000
 ):
     try:
+        safe_limit = max(1, min(int(limit), 25000))
+        safe_max_edges = max(1, min(int(max_edges), 25000))
+
         G = _build_neo4j_graph(
             mode=mode,
-            limit=limit
+            limit=safe_limit,
+            max_edges=safe_max_edges,
         )
 
         clean_graph_nodes(G, source="instagram")
@@ -70,18 +74,16 @@ async def create_instagram_graph_visualization_from_neo4j(
             reverse=True
         )
 
-        selected_nodes = set(sorted_nodes[:limit])
+        selected_nodes = set(sorted_nodes[:safe_limit])
 
         H = G.subgraph(selected_nodes).copy()
         H.remove_nodes_from(list(nx.isolates(H)))
-
-        degree_map = dict(H.degree(weight="weight"))
 
         sorted_edges = sorted(
             H.edges(data=True),
             key=lambda edge: edge[2].get("weight", 1),
             reverse=True
-        )[:max_edges]
+        )[:safe_max_edges]
 
         edge_node_ids = set()
 
@@ -90,6 +92,12 @@ async def create_instagram_graph_visualization_from_neo4j(
             edge_node_ids.add(target)
 
         H = H.subgraph(edge_node_ids).copy()
+
+        if H.number_of_nodes() == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="Tidak ada node yang tersisa setelah filtering visualisasi."
+            )
 
         community_map = apply_leiden_communities(H, weight_attr="weight")
 
@@ -137,6 +145,7 @@ async def create_instagram_graph_visualization_from_neo4j(
             })
 
         return {
+            "status": "success",
             "message": (
                 f"Graf visualisasi Instagram berhasil dibuat "
                 f"(Nodes: {len(nodes_output)}, Edges: {len(edges_output)}, Mode: {mode})."
@@ -145,16 +154,17 @@ async def create_instagram_graph_visualization_from_neo4j(
                 "nodes_count": len(nodes_output),
                 "edges_count": len(edges_output),
                 "communities_count": len(set(community_map.values())),
+                "limit": safe_limit,
+                "max_edges": safe_max_edges,
                 "nodes": nodes_output,
                 "edges": edges_output
             }
         }
 
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
+    except HTTPException:
+        raise
 
-        import traceback
+    except Exception as e:
         traceback.print_exc()
 
         raise HTTPException(
@@ -162,34 +172,52 @@ async def create_instagram_graph_visualization_from_neo4j(
             detail=f"Gagal membuat graf visualisasi Instagram Neo4j: {str(e)}"
         )
 
-def _build_neo4j_graph(mode: int, limit: int = 1000):
+def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
     G = nx.DiGraph()
+
+    safe_limit = max(1, min(int(limit), 25000))
+    safe_max_edges = max(1, min(int(max_edges), 25000))
 
     with neo4j_driver.session() as session_db:
         if mode == 1:
             query = """
-            CALL {
+            CALL () {
                 MATCH (u1:InstagramUser)-[:WROTE_IG]->(c:InstagramComment)-[:COMMENTED_ON_IG]->(p:InstagramPost)<-[:POSTED_IG]-(u2:InstagramUser)
                 WHERE u1.username <> u2.username
-                  AND toLower(coalesce(u1.username, '')) <> 'suarasurabayamedia'
-                  AND toLower(coalesce(u2.username, '')) <> 'suarasurabayamedia'
-                RETURN u1.username AS s_id, u2.username AS t_id, 3 AS w, 'COMMENT' AS t
+                AND toLower(coalesce(u1.username, '')) <> 'suarasurabayamedia'
+                AND toLower(coalesce(u2.username, '')) <> 'suarasurabayamedia'
+                RETURN u1.username AS s_id,
+                    u2.username AS t_id,
+                    3 AS w,
+                    'COMMENT' AS t
 
                 UNION ALL
 
                 MATCH (u1:InstagramUser)-[:WROTE_IG]->(r:InstagramComment)-[:REPLIED_TO_IG]->(c:InstagramComment)<-[:WROTE_IG]-(u2:InstagramUser)
                 WHERE u1.username <> u2.username
-                  AND toLower(coalesce(u1.username, '')) <> 'suarasurabayamedia'
-                  AND toLower(coalesce(u2.username, '')) <> 'suarasurabayamedia'
-                RETURN u1.username AS s_id, u2.username AS t_id, 4 AS w, 'REPLY' AS t
+                AND toLower(coalesce(u1.username, '')) <> 'suarasurabayamedia'
+                AND toLower(coalesce(u2.username, '')) <> 'suarasurabayamedia'
+                RETURN u1.username AS s_id,
+                    u2.username AS t_id,
+                    4 AS w,
+                    'REPLY' AS t
             }
-            WITH s_id, t_id, sum(w) AS total_weight, collect(DISTINCT t) AS rel_types
+            WITH s_id,
+                t_id,
+                sum(w) AS total_weight,
+                collect(DISTINCT t) AS rel_types
+            RETURN s_id,
+                t_id,
+                total_weight AS weight,
+                rel_types
             ORDER BY total_weight DESC
-            LIMIT $limit
-            RETURN s_id, t_id, total_weight AS weight, rel_types
+            LIMIT $max_edges
             """
 
-            records = session_db.run(query, limit=limit).data()
+            records = session_db.run(
+                query,
+                max_edges=safe_max_edges
+            ).data()
 
             for record in records:
                 source_username = record.get("s_id")
@@ -258,9 +286,9 @@ def _build_neo4j_graph(mode: int, limit: int = 1000):
             LIMIT $limit
             """
 
-            posts_data = session_db.run(query_posts, limit=limit).data()
-            comments_data = session_db.run(query_comments, limit=limit).data()
-            replies_data = session_db.run(query_replies, limit=limit).data()
+            posts_data = session_db.run(query_posts, limit=safe_limit).data()
+            comments_data = session_db.run(query_comments, limit=safe_limit).data()
+            replies_data = session_db.run(query_replies, limit=safe_limit).data()
 
             for record in posts_data:
                 username = record.get("uid")
@@ -460,7 +488,6 @@ def _build_neo4j_graph(mode: int, limit: int = 1000):
 
     return G
 
-
 async def analyze_instagram_graph_from_neo4j(limit: int = 1000, mode: int = 1):
     try:
         G = _build_neo4j_graph(
@@ -554,6 +581,7 @@ def _process_ig_to_neo4j_batch(posts_batch, comments_batch):
 
     comment_query = """
     UNWIND $comments AS comm
+
     MERGE (c:InstagramComment {id: comm.id})
     SET c.text = comm.text,
         c.likes = comm.likes,
@@ -565,18 +593,16 @@ def _process_ig_to_neo4j_batch(posts_batch, comments_batch):
     MERGE (u)-[:WROTE_IG]->(c)
 
     WITH c, comm
-    CALL {
-        WITH c, comm
-        WITH c, comm WHERE comm.type = 'COMMENT'
+
+    FOREACH (_ IN CASE WHEN comm.type = 'COMMENT' THEN [1] ELSE [] END |
         MERGE (p:InstagramPost {id: comm.target_id})
         MERGE (c)-[:COMMENTED_ON_IG]->(p)
-    }
-    CALL {
-        WITH c, comm
-        WITH c, comm WHERE comm.type = 'REPLY'
+    )
+
+    FOREACH (_ IN CASE WHEN comm.type = 'REPLY' THEN [1] ELSE [] END |
         MERGE (parent:InstagramComment {id: comm.target_id})
         MERGE (c)-[:REPLIED_TO_IG]->(parent)
-    }
+    )
     """
 
     try:

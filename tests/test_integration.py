@@ -1,127 +1,125 @@
-import pytest
-import pandas as pd
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-# =====================================================================
-# 1. EXPORT & LINK SHEETS
-# =====================================================================
-@pytest.mark.asyncio
-@patch("app.controllers.integration_controller.neo4j_driver.session")
-async def test_export_excel_app_source(mock_session, api_client):
-    mock_tx = MagicMock()
-    # PERBAIKAN: Melengkapi mock response Neo4j sesuai query di controller
-    mock_tx.run.return_value.data.return_value = [{
-        "Post_Author": "Budi", "Post_Content": "Halo", 
-        "Upload_Date": 1700000000000, # Menggunakan format timestamp
-        "Post_Likes": 10, "Post_Views": 50, "Post_Comments": 2, "Post_Shares": 0,
-        "Comment_Author": "Andi", "Comment_Content": "Keren!", 
-        "Comment_Likes": 1, "Comment_Replies_Count": 0,
-        "Target_Post_ID": "post_1"
-    }]
-    mock_session.return_value.__enter__.return_value = mock_tx
+from fastapi import HTTPException
 
-    payload = {"source": "app", "export_all": True}
-    response = api_client.post("/integration/export/excel", json=payload)
+
+def test_export_csv_success(api_client, mock_admin):
+    expected = {
+        "status": "success",
+        "message": "CSV berhasil dibuat.",
+        "filename": "export.csv",
+    }
+
+    payload = {
+        "source": "app",
+        "export_all": False,
+        "selected_columns": ["likes", "comment"],
+        "start_date": "2026-01-01",
+        "end_date": "2026-01-31",
+    }
+
+    with patch(
+        "app.routers.integration_router.integration_controller.export_csv",
+        return_value=expected,
+    ) as mock_controller:
+        response = api_client.post("/integration/export/csv", json=payload)
+
     assert response.status_code == 200
+    assert response.json() == expected
 
-@patch("app.controllers.integration_controller.os.path.exists", return_value=True)
-@patch("app.controllers.integration_controller.json.load")
-def test_export_excel_instagram(mock_json_load, mock_exists, api_client):
-    mock_json_load.return_value = [{"id": "ig_1", "timestamp": "2026-04-09", "caption": "SNA", "interactions": []}]
-    payload = {"source": "instagram", "export_all": True}
-    response = api_client.post("/integration/export/excel", json=payload)
+    called_payload, called_admin = mock_controller.call_args.args
+    assert called_payload.source == "app"
+    assert called_payload.export_all is False
+    assert called_payload.selected_columns == ["likes", "comment"]
+    assert called_admin == mock_admin
+
+
+def test_export_sheets_success(api_client, mock_admin):
+    expected = {
+        "status": "success",
+        "message": "Data berhasil diexport ke Google Sheets.",
+        "spreadsheet_url": "https://docs.google.com/spreadsheets/d/test",
+    }
+
+    payload = {
+        "source": "instagram",
+        "export_all": True,
+        "spreadsheet_title": "SNA Instagram Export",
+        "google_access_token": "google-token-test",
+    }
+
+    with patch(
+        "app.routers.integration_router.integration_controller.export_sheets",
+        return_value=expected,
+    ) as mock_controller:
+        response = api_client.post("/integration/export/sheets", json=payload)
+
     assert response.status_code == 200
+    assert response.json() == expected
 
-@pytest.mark.asyncio
-@patch("app.controllers.integration_controller.get_gspread_client")
-@patch("app.controllers.integration_controller.db")
-@patch("app.controllers.integration_controller.neo4j_driver.session")
-async def test_link_to_sheets_new(mock_session, mock_db, mock_gspread, api_client):
-    mock_gc = MagicMock()
-    mock_sh = MagicMock()
-    mock_sh.id = "123"
-    mock_sh.url = "https://docs.google.com/123"
-    mock_gc.create.return_value = mock_sh
-    mock_gspread.return_value = mock_gc
+    called_payload, called_admin = mock_controller.call_args.args
+    assert called_payload.source == "instagram"
+    assert called_payload.spreadsheet_title == "SNA Instagram Export"
+    assert called_admin == mock_admin
 
-    mock_doc_ref = MagicMock()
-    mock_doc_ref.id = "doc_123"
-    mock_db.collection.return_value.add.return_value = (None, mock_doc_ref)
 
-    payload = {"source": "app", "email": "test@test.com", "export_all": True}
-    response = api_client.post("/integration/sheets/link", json=payload)
+def test_get_linked_sheets_success(api_client, mock_admin):
+    expected = {
+        "status": "success",
+        "data": [
+            {
+                "doc_id": "doc_1",
+                "sheet_name": "SNA Export",
+                "source": "app",
+            }
+        ],
+    }
+
+    with patch(
+        "app.routers.integration_router.integration_controller.get_linked_sheets",
+        return_value=expected,
+    ) as mock_controller:
+        response = api_client.get("/integration/sheets/linked")
+
     assert response.status_code == 200
+    assert response.json() == expected
+    mock_controller.assert_called_once_with(mock_admin)
 
-@pytest.mark.asyncio
-@patch("app.controllers.integration_controller.db")
-async def test_get_linked_sheets(mock_db, api_client):
-    mock_doc = MagicMock()
-    mock_doc.id = "doc_1"
-    mock_doc.to_dict.return_value = {"sheet_name": "SNA_Dataset", "source_type": "app"}
-    mock_db.collection.return_value.order_by.return_value.stream.return_value = [mock_doc]
 
-    response = api_client.get("/integration/sheets/linked")
+def test_unlink_sheet_success(api_client, mock_admin):
+    expected = {
+        "status": "success",
+        "message": "Spreadsheet berhasil di-unlink.",
+    }
+
+    with patch(
+        "app.routers.integration_router.integration_controller.unlink_sheet",
+        return_value=expected,
+    ) as mock_controller:
+        response = api_client.delete("/integration/sheets/unlink/doc_123")
+
     assert response.status_code == 200
+    assert response.json() == expected
+    mock_controller.assert_called_once_with("doc_123", mock_admin)
 
-# =====================================================================
-# 2. SYNC & UNLINK SHEETS
-# =====================================================================
-@pytest.mark.asyncio
-@patch("app.controllers.integration_controller.get_gspread_client")
-async def test_sync_to_sheets(mock_gspread, api_client):
-    mock_gc = MagicMock()
-    mock_sh = MagicMock()
-    mock_sh.get_worksheet.return_value = MagicMock()
-    mock_gc.open_by_key.return_value = mock_sh
-    mock_gspread.return_value = mock_gc
-    
-    with patch("app.controllers.integration_controller.get_master_dataframe") as mock_df:
-        mock_df.return_value = pd.DataFrame([{"A": 1}])
-        payload = {"sheet_id": "123", "source": "app"}
-        response = api_client.post("/integration/sheets/sync", json=payload)
-        # Handle fallback jika API aslinya menggunakan PUT
-        if response.status_code == 405:
-             response = api_client.put("/integration/sheets/sync", json=payload)
-        assert response.status_code in [200, 201]
 
-@pytest.mark.asyncio
-@patch("app.controllers.integration_controller.db")
-async def test_unlink_sheets(mock_db, api_client):
-    mock_doc = MagicMock()
-    mock_doc.exists = True
-    mock_db.collection.return_value.document.return_value.get.return_value = mock_doc
-    response = api_client.delete("/integration/sheets/unlink/doc123")
-    assert response.status_code == 200
+def test_unlink_sheet_not_found(api_client):
+    with patch(
+        "app.routers.integration_router.integration_controller.unlink_sheet",
+        side_effect=HTTPException(status_code=404, detail="Dokumen tidak ditemukan."),
+    ):
+        response = api_client.delete("/integration/sheets/unlink/doc_999")
 
-# =====================================================================
-# 3. IMPORT & GRAPH CALCULATIONS
-# =====================================================================
-# @patch("app.controllers.integration_controller.pd.read_excel")
-# def test_import_from_excel(mock_read_excel, api_client):
-#     mock_df = pd.DataFrame([{"Source_User": "A", "Target": "B"}])
-#     mock_read_excel.return_value = mock_df
-    
-#     # PERBAIKAN: Gunakan `params` untuk query param, dan sesuaikan file tuple
-#     response = api_client.post(
-#         "/integration/import/excel", 
-#         files={"file": ("test.xlsx", b"dummy", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}, 
-#         params={"source": "app"}
-#     )
-#     assert response.status_code == 200
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Dokumen tidak ditemukan."
 
-# @patch("app.controllers.integration_controller.get_gspread_client")
-# def test_import_from_sheets(mock_gspread, api_client):
-#     mock_gc = MagicMock()
-#     mock_sh = MagicMock()
-#     mock_ws = MagicMock()
-#     mock_ws.get_all_records.return_value = [{"Source_User": "A", "Target": "B"}]
-#     mock_sh.get_worksheet.return_value = mock_ws
-#     mock_gc.open_by_key.return_value = mock_sh
-#     mock_gspread.return_value = mock_gc
-    
-#     # PERBAIKAN: Gunakan GET dengan params sesuai standar REST
-#     response = api_client.get(
-#         "/integration/import/sheets", 
-#         params={"sheet_id": "123", "source": "app"}
-#     )
-#     assert response.status_code == 200
+
+def test_export_csv_rejects_invalid_source(api_client):
+    payload = {
+        "source": "twitter",
+        "export_all": True,
+    }
+
+    response = api_client.post("/integration/export/csv", json=payload)
+
+    assert response.status_code == 422

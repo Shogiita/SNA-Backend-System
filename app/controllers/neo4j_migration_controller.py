@@ -227,8 +227,13 @@ def _ensure_neo4j_constraints():
         REQUIRE p.id IS UNIQUE
         """,
         """
-        CREATE CONSTRAINT firebase_comment_id IF NOT EXISTS
-        FOR (c:FirebaseComment)
+        CREATE CONSTRAINT firebase_kawanss_comment_id IF NOT EXISTS
+        FOR (c:FirebaseKawanSSComment)
+        REQUIRE c.id IS UNIQUE
+        """,
+        """
+        CREATE CONSTRAINT firebase_infoss_comment_id IF NOT EXISTS
+        FOR (c:FirebaseInfossComment)
         REQUIRE c.id IS UNIQUE
         """
     ]
@@ -599,7 +604,16 @@ def _upsert_comments(comments: list[dict[str, Any]]):
     WITH c, comment
     OPTIONAL MATCH (p1:FirebaseKawanSS {id: comment.post_id})
     OPTIONAL MATCH (p2:FirebaseInfoss {id: comment.post_id})
-    WITH c, comment, coalesce(p1, p2) AS post
+    WITH c, comment, p1, p2, coalesce(p1, p2) AS post
+
+    FOREACH (_ IN CASE WHEN p1 IS NOT NULL THEN [1] ELSE [] END |
+        SET c:FirebaseKawanSSComment
+    )
+
+    FOREACH (_ IN CASE WHEN p2 IS NOT NULL THEN [1] ELSE [] END |
+        SET c:FirebaseInfossComment
+    )
+
     FOREACH (_ IN CASE WHEN post IS NOT NULL THEN [1] ELSE [] END |
         MERGE (c)-[:COMMENTED_ON_FB]->(post)
     )

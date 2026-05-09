@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import tempfile
 import datetime
@@ -18,12 +19,10 @@ from app.database import neo4j_driver, db
 from app.config import GOOGLE_CREDENTIALS
 from app.utils.leiden_utils import apply_leiden_communities
 
-
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-
 
 MANDATORY_COLUMNS = {
     "instagram": [
@@ -108,6 +107,90 @@ NORMALIZED_TO_LEGACY = {
     "comment_count": "Jumlah_Comment_Post",
 }
 
+def _extract_spreadsheet_id(spreadsheet_id: Optional[str], spreadsheet_url: Optional[str]) -> str:
+    if spreadsheet_id:
+        return spreadsheet_id.strip()
+
+    if not spreadsheet_url:
+        raise HTTPException(
+            status_code=400,
+            detail="spreadsheet_id atau spreadsheet_url wajib diisi."
+        )
+
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", spreadsheet_url)
+
+    if not match:
+        raise HTTPException(
+            status_code=400,
+            detail="URL Google Spreadsheet tidak valid."
+        )
+
+    return match.group(1)
+
+def import_sheets(payload, current_admin: dict):
+    """
+    Import data dari Google Spreadsheet.
+
+    Catatan:
+    Function ini membaca spreadsheet lalu mengembalikan data normalized.
+    Penyimpanan ke Neo4j bisa dibuat tahap berikutnya setelah format kolom final disepakati.
+    """
+    source_type = payload.source
+    spreadsheet_id = _extract_spreadsheet_id(
+        payload.spreadsheet_id,
+        payload.spreadsheet_url,
+    )
+
+    client = get_gspread_user_client(payload.google_access_token)
+
+    try:
+        spreadsheet = client.open_by_key(spreadsheet_id)
+
+        if payload.worksheet_name:
+            worksheet = spreadsheet.worksheet(payload.worksheet_name)
+        else:
+            worksheet = spreadsheet.sheet1
+
+        records = worksheet.get_all_records()
+
+        df = pd.DataFrame(records)
+
+        if df.empty:
+            return {
+                "status": "success",
+                "source_active": source_type,
+                "message": "Spreadsheet kosong.",
+                "total_rows": 0,
+                "columns": [],
+                "data_preview": [],
+            }
+
+        normalized_df = _convert_legacy_df_to_normalized(df, source_type)
+
+        return {
+            "status": "success",
+            "source_active": source_type,
+            "spreadsheet": {
+                "id": spreadsheet_id,
+                "title": spreadsheet.title,
+                "worksheet": worksheet.title,
+            },
+            "total_rows": len(normalized_df),
+            "columns": list(normalized_df.columns),
+            "data_preview": normalized_df.head(20).fillna("").to_dict(orient="records"),
+            "note": (
+                "Data berhasil dibaca dan dinormalisasi. "
+                "Tahap berikutnya dapat diarahkan ke penyimpanan Neo4j jika diperlukan."
+            )
+        }
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Gagal import Google Spreadsheet: {str(error)}"
+        )
 
 def get_gspread_client():
     try:
@@ -160,6 +243,7 @@ def get_gspread_user_client(google_access_token: str):
             status_code=401,
             detail=f"Gagal otentikasi Google user: {error_message}",
         )
+
 def _parse_to_datetime(value):
     if pd.isna(value) or str(value).strip() == "":
         return pd.NaT
@@ -183,7 +267,6 @@ def _parse_to_datetime(value):
         return pd.to_datetime(value_num, unit="s", errors="coerce")
     except Exception:
         return pd.NaT
-
 
 def _apply_date_filter(
     df: pd.DataFrame,
@@ -217,7 +300,6 @@ def _apply_date_filter(
 
     return df.drop(columns=["Datetime_Obj"], errors="ignore")
 
-
 def _normalize_frontend_columns(selected_columns: Optional[List[str]]) -> List[str]:
     normalized = []
 
@@ -235,7 +317,6 @@ def _normalize_frontend_columns(selected_columns: Optional[List[str]]) -> List[s
                 normalized.append(mapped)
 
     return normalized
-
 
 def _convert_legacy_df_to_normalized(df: pd.DataFrame, source_type: str) -> pd.DataFrame:
     if df.empty:
@@ -268,7 +349,6 @@ def _convert_legacy_df_to_normalized(df: pd.DataFrame, source_type: str) -> pd.D
 
     return result
 
-
 def _select_export_columns(
     df: pd.DataFrame,
     source_type: str,
@@ -296,7 +376,6 @@ def _select_export_columns(
             df[col] = ""
 
     return df[final_columns]
-
 
 def _make_legacy_export_dataframe(
     source_type: str,
@@ -553,7 +632,6 @@ def _make_legacy_export_dataframe(
 
     return _apply_date_filter(df, start_date, end_date)
 
-
 def get_master_dataframe(
     source_type: str,
     start_date: Optional[str] = None,
@@ -595,7 +673,6 @@ def get_master_dataframe(
 
     return legacy_df
 
-
 def _get_export_dataframe(payload) -> pd.DataFrame:
     source_type = payload.source
 
@@ -619,7 +696,6 @@ def _get_export_dataframe(payload) -> pd.DataFrame:
         selected_columns=payload.selected_columns,
         export_all=payload.export_all,
     )
-
 
 def export_csv(payload, current_admin=None):
     try:
@@ -651,194 +727,6 @@ def export_csv(payload, current_admin=None):
         raise HTTPException(
             status_code=500,
             detail=f"Export CSV gagal: {str(e)}",
-        )
-
-
-def export_sheets(payload, current_admin=None):
-    if payload.source not in ["app", "instagram"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Pilihan sumber data hanya 'app' atau 'instagram'.",
-        )
-
-    if not payload.google_access_token:
-        raise HTTPException(
-            status_code=401,
-            detail="Google Access Token tidak ditemukan. Silakan login ulang dengan Google dan izinkan akses Drive/Sheets.",
-        )
-
-    try:
-        df = get_master_dataframe(
-            source_type=payload.source,
-            start_date=payload.start_date,
-            end_date=payload.end_date,
-            selected_columns=payload.selected_columns,
-            export_all=payload.export_all,
-        )
-
-        if df is None or df.empty:
-            raise HTTPException(
-                status_code=404,
-                detail="Tidak ada data untuk diexport pada filter yang dipilih.",
-            )
-
-        spreadsheet_title = (
-            payload.spreadsheet_title
-            or f"SNA Export {payload.source.upper()} {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        ).strip()
-
-        gc = get_gspread_user_client(payload.google_access_token)
-
-        sh = gc.create(spreadsheet_title)
-        worksheet = sh.sheet1
-        worksheet.update_title("Export Data")
-
-        safe_df = df.fillna("").astype(str)
-        values = [safe_df.columns.tolist()] + safe_df.values.tolist()
-
-        worksheet.clear()
-        worksheet.update(values, "A1")
-
-        admin_email = None
-        admin_uid = None
-
-        if current_admin:
-            admin_email = current_admin.get("email")
-            admin_uid = current_admin.get("uid")
-
-        doc_id = None
-        try:
-            doc_data = {
-                "sheet_id": sh.id,
-                "sheet_url": sh.url,
-                "sheet_name": spreadsheet_title,
-                "source_type": payload.source,
-                "rows_count": len(df),
-                "columns": df.columns.tolist(),
-                "created_by_uid": admin_uid,
-                "created_by_email": admin_email,
-                "storage_owner": "login_user_drive",
-                "created_at": datetime.datetime.now().isoformat(),
-                "updated_at": datetime.datetime.now().isoformat(),
-            }
-
-            _, doc_ref = db.collection("linked_sheets").add(doc_data)
-            doc_id = doc_ref.id
-        except Exception:
-            pass
-
-        return {
-            "status": "success",
-            "message": "Data berhasil diexport ke Google Sheets dan disimpan di Google Drive user login.",
-            "spreadsheet_title": spreadsheet_title,
-            "spreadsheet_url": sh.url,
-            "source": payload.source,
-            "rows_count": len(df),
-            "columns": df.columns.tolist(),
-            "storage_owner": "login_user_drive",
-            "data": {
-                "id": doc_id,
-                "sheet_url": sh.url,
-                "sheet_name": spreadsheet_title,
-            },
-        }
-
-    except HTTPException:
-        raise
-    except gspread.exceptions.APIError as api_error:
-        error_text = str(api_error)
-
-        if "insufficient authentication scopes" in error_text.lower():
-            raise HTTPException(
-                status_code=403,
-                detail="Akses Google belum memiliki izin Drive/Sheets. Silakan logout lalu login ulang dengan Google dan berikan permission Drive serta Sheets.",
-            )
-
-        if "storage quota" in error_text.lower() or "quota" in error_text.lower():
-            raise HTTPException(
-                status_code=403,
-                detail="Storage Google Drive akun yang login penuh atau tidak memiliki quota cukup.",
-            )
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Export Sheets gagal: {str(api_error)}",
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Export Sheets gagal: {str(e)}",
-        )
-
-
-def get_linked_sheets(current_admin=None):
-    try:
-        query = db.collection("linked_sheets").order_by(
-            "created_at",
-            direction="DESCENDING",
-        )
-
-        docs = query.stream()
-        result = []
-
-        current_uid = current_admin.get("uid") if current_admin else None
-
-        for doc in docs:
-            item = doc.to_dict()
-            item["id"] = doc.id
-
-            if current_uid and item.get("created_by_uid"):
-                if item.get("created_by_uid") != current_uid:
-                    continue
-
-            result.append(item)
-
-        return {
-            "status": "success",
-            "data": result,
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Gagal mengambil daftar Spreadsheet: {str(e)}",
-        )
-
-
-def unlink_sheet(doc_id: str, current_admin=None):
-    try:
-        doc_ref = db.collection("linked_sheets").document(doc_id)
-        snapshot = doc_ref.get()
-
-        if not snapshot.exists:
-            raise HTTPException(
-                status_code=404,
-                detail="Riwayat Spreadsheet tidak ditemukan.",
-            )
-
-        data = snapshot.to_dict()
-        current_uid = current_admin.get("uid") if current_admin else None
-
-        if current_uid and data.get("created_by_uid"):
-            if data.get("created_by_uid") != current_uid:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Anda tidak memiliki akses untuk menghapus riwayat ini.",
-                )
-
-        doc_ref.delete()
-
-        return {
-            "status": "success",
-            "message": "Riwayat Spreadsheet berhasil dihapus.",
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Gagal menghapus riwayat Spreadsheet: {str(e)}",
         )
 
 def export_sheets(payload, current_admin: Optional[Dict[str, Any]] = None):
@@ -1076,7 +964,6 @@ async def export_to_csv(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 async def link_to_sheets(
     existing_sheet_url: str,
