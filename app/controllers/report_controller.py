@@ -28,6 +28,35 @@ from google.analytics.data_v1beta.types import (
     Filter
 )
 
+
+def _safe_percentage(current_value: int, previous_value: int) -> float:
+    """
+    Growth user untuk dashboard.
+
+    Dipakai untuk menunjukkan persentase pertambahan user baru.
+    Jika bulan ini tidak ada user baru, return 0.0 agar dashboard tidak menampilkan -100%.
+    """
+
+    current_value = _safe_int(current_value)
+    previous_value = _safe_int(previous_value)
+
+    if current_value <= 0:
+        return 0.0
+
+    if previous_value <= 0:
+        return 100.0
+
+    return round(((current_value - previous_value) / previous_value) * 100, 2)
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except Exception:
+        return default
+
 def get_ga_credentials():
     return service_account.Credentials.from_service_account_info({
         "type": os.getenv("GCP_TYPE"),
@@ -819,6 +848,446 @@ def get_live_analytics_summary():
         return {"status": "error", "message": str(e)}
 
 def get_stats_summary():
+    try:
+        now = datetime.now()
+
+        this_month_start = now.replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+
+        last_month_end = this_month_start - timedelta(seconds=1)
+        last_month_start = last_month_end.replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+
+        last_30_days_start = now - timedelta(days=30)
+
+        this_month_start_epoch = int(this_month_start.timestamp() * 1000)
+        now_epoch = int(now.timestamp() * 1000)
+
+        last_month_start_epoch = int(last_month_start.timestamp() * 1000)
+        last_month_end_epoch = int(last_month_end.timestamp() * 1000)
+
+        last_30_days_epoch = int(last_30_days_start.timestamp() * 1000)
+
+        this_month_start_iso = this_month_start.isoformat()
+        now_iso = now.isoformat()
+
+        last_month_start_iso = last_month_start.isoformat()
+        last_month_end_iso = last_month_end.isoformat()
+
+        last_30_days_iso = last_30_days_start.isoformat()
+
+        this_month_start_ig = this_month_start.astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S+0000"
+        )
+        now_ig = now.astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S+0000"
+        )
+        last_30_days_ig = last_30_days_start.astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S+0000"
+        )
+
+        query = """
+        CALL () {
+            MATCH (u:FirebaseUser)
+            RETURN count(u) AS total_users
+        }
+
+        CALL () {
+            MATCH (u:FirebaseUser)
+            WHERE
+                (
+                    u.createdAt IS NOT NULL
+                    AND u.createdAt >= $this_month_start_epoch
+                    AND u.createdAt <= $now_epoch
+                )
+                OR
+                (
+                    u.createdAt IS NOT NULL
+                    AND toString(u.createdAt) >= $this_month_start_iso
+                    AND toString(u.createdAt) <= $now_iso
+                )
+                OR
+                (
+                    u.tglRegister IS NOT NULL
+                    AND toString(u.tglRegister) >= $this_month_start_iso
+                    AND toString(u.tglRegister) <= $now_iso
+                )
+                OR
+                (
+                    u.registerDate IS NOT NULL
+                    AND toString(u.registerDate) >= $this_month_start_iso
+                    AND toString(u.registerDate) <= $now_iso
+                )
+            RETURN count(u) AS new_users_this_month
+        }
+
+        CALL () {
+            MATCH (u:FirebaseUser)
+            WHERE
+                (
+                    u.createdAt IS NOT NULL
+                    AND u.createdAt >= $last_month_start_epoch
+                    AND u.createdAt <= $last_month_end_epoch
+                )
+                OR
+                (
+                    u.createdAt IS NOT NULL
+                    AND toString(u.createdAt) >= $last_month_start_iso
+                    AND toString(u.createdAt) <= $last_month_end_iso
+                )
+                OR
+                (
+                    u.tglRegister IS NOT NULL
+                    AND toString(u.tglRegister) >= $last_month_start_iso
+                    AND toString(u.tglRegister) <= $last_month_end_iso
+                )
+                OR
+                (
+                    u.registerDate IS NOT NULL
+                    AND toString(u.registerDate) >= $last_month_start_iso
+                    AND toString(u.registerDate) <= $last_month_end_iso
+                )
+            RETURN count(u) AS new_users_last_month
+        }
+
+        CALL () {
+            MATCH (p:FirebaseInfoss)
+            WHERE p.isDeleted = false OR p.isDeleted IS NULL
+            RETURN count(p) AS total_infoss_posts
+        }
+
+        CALL () {
+            MATCH (p:FirebaseKawanSS)
+            WHERE p.isDeleted = false OR p.isDeleted IS NULL
+            RETURN count(p) AS total_kawanss_posts
+        }
+
+        CALL () {
+            MATCH (p:FirebaseInfoss)
+            WHERE (p.isDeleted = false OR p.isDeleted IS NULL)
+              AND (
+                (
+                    p.createdAt IS NOT NULL
+                    AND p.createdAt >= $last_30_days_epoch
+                    AND p.createdAt <= $now_epoch
+                )
+                OR
+                (
+                    p.uploadDate IS NOT NULL
+                    AND toString(p.uploadDate) >= $last_30_days_iso
+                    AND toString(p.uploadDate) <= $now_iso
+                )
+                OR
+                (
+                    p.createdAt IS NOT NULL
+                    AND toString(p.createdAt) >= $last_30_days_iso
+                    AND toString(p.createdAt) <= $now_iso
+                )
+              )
+            RETURN count(p) AS new_30_days_infoss
+        }
+
+        CALL () {
+            MATCH (p:FirebaseKawanSS)
+            WHERE (p.isDeleted = false OR p.isDeleted IS NULL)
+              AND (
+                (
+                    p.createdAt IS NOT NULL
+                    AND p.createdAt >= $last_30_days_epoch
+                    AND p.createdAt <= $now_epoch
+                )
+                OR
+                (
+                    p.createdAt IS NOT NULL
+                    AND toString(p.createdAt) >= $last_30_days_iso
+                    AND toString(p.createdAt) <= $now_iso
+                )
+              )
+            RETURN count(p) AS new_30_days_kawanss
+        }
+
+        CALL () {
+            MATCH (c:FirebaseInfossComment)
+            RETURN count(c) AS total_infoss_comments
+        }
+
+        CALL () {
+            MATCH (c:FirebaseKawanSSComment)
+            RETURN count(c) AS total_kawanss_comments
+        }
+
+        CALL () {
+            MATCH (c:FirebaseInfossComment)
+            WHERE
+                (
+                    c.createdAt IS NOT NULL
+                    AND c.createdAt >= $this_month_start_epoch
+                    AND c.createdAt <= $now_epoch
+                )
+                OR
+                (
+                    c.createdAt IS NOT NULL
+                    AND toString(c.createdAt) >= $this_month_start_iso
+                    AND toString(c.createdAt) <= $now_iso
+                )
+            RETURN count(c) AS this_month_infoss_comments
+        }
+
+        CALL () {
+            MATCH (c:FirebaseKawanSSComment)
+            WHERE
+                (
+                    c.createdAt IS NOT NULL
+                    AND c.createdAt >= $this_month_start_epoch
+                    AND c.createdAt <= $now_epoch
+                )
+                OR
+                (
+                    c.createdAt IS NOT NULL
+                    AND toString(c.createdAt) >= $this_month_start_iso
+                    AND toString(c.createdAt) <= $now_iso
+                )
+            RETURN count(c) AS this_month_kawanss_comments
+        }
+
+        CALL () {
+            MATCH (p:InstagramPost)
+            RETURN count(p) AS total_instagram_posts
+        }
+
+        CALL () {
+            MATCH (p:InstagramPost)
+            WHERE p.timestamp IS NOT NULL
+              AND p.timestamp >= $last_30_days_ig
+              AND p.timestamp <= $now_ig
+            RETURN count(p) AS new_30_days_instagram_posts
+        }
+
+        CALL () {
+            MATCH (c:InstagramComment)
+            RETURN count(c) AS total_instagram_comments
+        }
+
+        CALL () {
+            MATCH (c:InstagramComment)
+            WHERE c.timestamp IS NOT NULL
+              AND c.timestamp >= $this_month_start_ig
+              AND c.timestamp <= $now_ig
+            RETURN count(c) AS this_month_instagram_comments
+        }
+
+        RETURN
+            total_users,
+            new_users_this_month,
+            new_users_last_month,
+            total_infoss_posts,
+            total_kawanss_posts,
+            new_30_days_infoss,
+            new_30_days_kawanss,
+            total_infoss_comments,
+            total_kawanss_comments,
+            this_month_infoss_comments,
+            this_month_kawanss_comments,
+            total_instagram_posts,
+            new_30_days_instagram_posts,
+            total_instagram_comments,
+            this_month_instagram_comments
+        """
+
+        with neo4j_driver.session() as session:
+            record = session.run(
+                query,
+                this_month_start_epoch=this_month_start_epoch,
+                now_epoch=now_epoch,
+                last_month_start_epoch=last_month_start_epoch,
+                last_month_end_epoch=last_month_end_epoch,
+                last_30_days_epoch=last_30_days_epoch,
+                this_month_start_iso=this_month_start_iso,
+                now_iso=now_iso,
+                last_month_start_iso=last_month_start_iso,
+                last_month_end_iso=last_month_end_iso,
+                last_30_days_iso=last_30_days_iso,
+                this_month_start_ig=this_month_start_ig,
+                now_ig=now_ig,
+                last_30_days_ig=last_30_days_ig,
+            ).single()
+
+        if record is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Data statistik dashboard tidak ditemukan.",
+            )
+
+        data = dict(record)
+
+        total_users = _safe_int(data.get("total_users"))
+        new_users_this_month = _safe_int(data.get("new_users_this_month"))
+        new_users_last_month = _safe_int(data.get("new_users_last_month"))
+
+        total_infoss_posts = _safe_int(data.get("total_infoss_posts"))
+        total_kawanss_posts = _safe_int(data.get("total_kawanss_posts"))
+        total_app_posts = total_infoss_posts + total_kawanss_posts
+
+        new_30_days_infoss = _safe_int(data.get("new_30_days_infoss"))
+        new_30_days_kawanss = _safe_int(data.get("new_30_days_kawanss"))
+        new_30_days_app_posts = new_30_days_infoss + new_30_days_kawanss
+
+        total_infoss_comments = _safe_int(data.get("total_infoss_comments"))
+        total_kawanss_comments = _safe_int(data.get("total_kawanss_comments"))
+        total_app_comments = total_infoss_comments + total_kawanss_comments
+
+        this_month_infoss_comments = _safe_int(
+            data.get("this_month_infoss_comments")
+        )
+        this_month_kawanss_comments = _safe_int(
+            data.get("this_month_kawanss_comments")
+        )
+        this_month_app_comments = (
+            this_month_infoss_comments + this_month_kawanss_comments
+        )
+
+        total_instagram_posts = _safe_int(data.get("total_instagram_posts"))
+        new_30_days_instagram_posts = _safe_int(
+            data.get("new_30_days_instagram_posts")
+        )
+
+        total_instagram_comments = _safe_int(data.get("total_instagram_comments"))
+        this_month_instagram_comments = _safe_int(
+            data.get("this_month_instagram_comments")
+        )
+
+        user_growth_percentage = _safe_percentage(
+            new_users_this_month,
+            new_users_last_month,
+        )
+
+        total_monthly_comments = (
+            this_month_app_comments + this_month_instagram_comments
+        )
+
+        total_monthly_interactions = (
+            new_users_this_month
+            + new_30_days_app_posts
+            + new_30_days_instagram_posts
+            + total_monthly_comments
+        )
+
+        users = {
+            "total": total_users,
+            "new_this_month": new_users_this_month,
+            "new_last_month": new_users_last_month,
+            "growth_percentage": user_growth_percentage,
+            "comparison_text": (
+                f"{new_users_this_month} user baru bulan ini, "
+                f"{new_users_last_month} user baru bulan lalu"
+            ),
+
+            # legacy key agar frontend lama tetap aman
+            "total_post": total_app_posts,
+            "total_post_kawanss": total_kawanss_posts,
+        }
+
+        posts = {
+            "total": total_app_posts,
+            "total_infoss": total_infoss_posts,
+            "total_kawan_ss": total_kawanss_posts,
+            "new_30_days": new_30_days_app_posts,
+            "new_30_days_infoss": new_30_days_infoss,
+            "new_30_days_kawan_ss": new_30_days_kawanss,
+
+            # info tambahan, bukan source utama total post dashboard
+            "instagram_total": total_instagram_posts,
+            "instagram_new_30_days": new_30_days_instagram_posts,
+        }
+
+        monthly_report = {
+            "report_type": "monthly",
+            "period": {
+                "start": this_month_start.strftime("%Y-%m-%d"),
+                "end": now.strftime("%Y-%m-%d"),
+                "label": now.strftime("%B %Y"),
+            },
+            "users": {
+                "total": total_users,
+                "new_this_month": new_users_this_month,
+                "new_last_month": new_users_last_month,
+                "growth_percentage": user_growth_percentage,
+            },
+            "posts": {
+                "total": total_app_posts,
+                "infoss_total": total_infoss_posts,
+                "kawan_ss_total": total_kawanss_posts,
+                "new_30_days": new_30_days_app_posts,
+                "infoss_new_30_days": new_30_days_infoss,
+                "kawan_ss_new_30_days": new_30_days_kawanss,
+                "instagram_total": total_instagram_posts,
+                "instagram_new_30_days": new_30_days_instagram_posts,
+            },
+            "comments": {
+                "app_total": total_app_comments,
+                "app_this_month": this_month_app_comments,
+                "instagram_total": total_instagram_comments,
+                "instagram_this_month": this_month_instagram_comments,
+                "combined_this_month": total_monthly_comments,
+            },
+            "interactions": {
+                "combined_this_month": total_monthly_interactions,
+                "description": (
+                    "Jumlah interaksi dihitung dari user baru, post baru, "
+                    "komentar aplikasi, dan komentar Instagram pada bulan berjalan."
+                ),
+            },
+            "summary_cards": [
+                {
+                    "title": "Total Users",
+                    "value": total_users,
+                    "description": "Total pengguna aplikasi Suara Surabaya.",
+                },
+                {
+                    "title": "New Users This Month",
+                    "value": new_users_this_month,
+                    "description": "Jumlah pengguna baru aplikasi pada bulan berjalan.",
+                },
+                {
+                    "title": "Total App Posts",
+                    "value": total_app_posts,
+                    "description": "Total post dari data aplikasi, yaitu InfoSS dan KawanSS.",
+                },
+                {
+                    "title": "Monthly Interactions",
+                    "value": total_monthly_interactions,
+                    "description": "Ringkasan interaksi aplikasi dan Instagram pada bulan berjalan.",
+                },
+            ],
+        }
+
+        return {
+            "status": "success",
+            "data": {
+                "users": users,
+                "posts": posts,
+                "monthly_report": monthly_report,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "message": str(e),
+        }
     """
     Dashboard stats + monthly report summary.
 

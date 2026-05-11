@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Body
 
 from app.controllers import integration_controller
 from app.middleware.firebase_auth import get_current_admin
@@ -21,6 +21,14 @@ def export_sheets(
     current_admin: dict = Depends(get_current_admin),
 ):
     return integration_controller.export_sheets(payload, current_admin)
+
+
+@router.post("/sheets/link")
+def link_existing_sheet(
+    payload: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin),
+):
+    return integration_controller.link_existing_sheet(payload, current_admin)
 
 
 @router.post("/import/sheets")

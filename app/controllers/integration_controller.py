@@ -838,6 +838,138 @@ def export_sheets(payload, current_admin: Optional[Dict[str, Any]] = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Export Sheets gagal: {str(e)}")
 
+def link_existing_sheet(payload: Dict[str, Any], current_admin: Optional[Dict[str, Any]] = None):
+    """
+    Menghubungkan data export SNA ke Google Spreadsheet yang sudah dibuat user.
+
+    Frontend mengirim payload:
+    {
+        "source": "app" | "instagram",
+        "existing_sheet_url": "https://docs.google.com/spreadsheets/d/...",
+        "export_all": true,
+        "selected_columns": [],
+        "start_date": "YYYY-MM-DD",
+        "end_date": "YYYY-MM-DD"
+    }
+    """
+
+    try:
+        source_type = payload.get("source", "app")
+        existing_sheet_url = payload.get("existing_sheet_url")
+        export_all = bool(payload.get("export_all", True))
+        selected_columns = payload.get("selected_columns", [])
+        start_date = payload.get("start_date")
+        end_date = payload.get("end_date")
+
+        if source_type not in ["app", "instagram"]:
+            raise HTTPException(
+                status_code=400,
+                detail="source harus bernilai 'app' atau 'instagram'.",
+            )
+
+        if not existing_sheet_url:
+            raise HTTPException(
+                status_code=400,
+                detail="URL Google Spreadsheet wajib diisi.",
+            )
+
+        df = get_master_dataframe(
+            source_type=source_type,
+            start_date=start_date,
+            end_date=end_date,
+            selected_columns=selected_columns,
+            export_all=export_all,
+        )
+
+        if df is None or df.empty:
+            raise HTTPException(
+                status_code=404,
+                detail="Tidak ada data untuk diexport pada filter yang dipilih.",
+            )
+
+        gc = get_gspread_client()
+
+        try:
+            sh = gc.open_by_url(existing_sheet_url)
+        except Exception:
+            service_account_email = GOOGLE_CREDENTIALS.get(
+                "client_email",
+                "Email Service Account tidak ditemukan",
+            )
+
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Akses Google Spreadsheet ditolak. Pastikan Spreadsheet sudah "
+                    f"diberi akses Editor ke service account: {service_account_email}"
+                ),
+            )
+
+        worksheet_title = "DATA_APP" if source_type == "app" else "DATA_IG"
+
+        try:
+            worksheet = sh.worksheet(worksheet_title)
+            worksheet.clear()
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = sh.add_worksheet(
+                title=worksheet_title,
+                rows=max(len(df) + 10, 100),
+                cols=max(len(df.columns) + 5, 20),
+            )
+
+        safe_df = df.fillna("").astype(str)
+        values = [safe_df.columns.tolist()] + safe_df.values.tolist()
+
+        worksheet.update(values, "A1")
+
+        admin_email = current_admin.get("email") if current_admin else None
+        admin_uid = current_admin.get("uid") if current_admin else None
+
+        doc_data = {
+            "sheet_id": sh.id,
+            "sheet_url": sh.url,
+            "sheet_name": f"{sh.title} ({source_type.upper()})",
+            "worksheet": worksheet_title,
+            "source_type": source_type,
+            "rows_count": len(df),
+            "columns": df.columns.tolist(),
+            "created_by_uid": admin_uid,
+            "created_by_email": admin_email,
+            "storage_owner": "existing_user_sheet",
+            "created_at": datetime.datetime.now().isoformat(),
+            "updated_at": datetime.datetime.now().isoformat(),
+        }
+
+        try:
+            _, doc_ref = db.collection("linked_sheets").add(doc_data)
+            doc_id = doc_ref.id
+        except Exception:
+            doc_id = None
+
+        return {
+            "status": "success",
+            "message": "Data berhasil ditautkan ke Google Spreadsheet.",
+            "spreadsheet_url": sh.url,
+            "worksheet": worksheet_title,
+            "source": source_type,
+            "rows_count": len(df),
+            "columns": df.columns.tolist(),
+            "data": {
+                "id": doc_id,
+                "sheet_url": sh.url,
+                "sheet_name": sh.title,
+                "worksheet": worksheet_title,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Gagal menautkan data ke Google Spreadsheet: {str(e)}",
+        )
+
 def get_linked_sheets(current_admin=None):
     try:
         current_uid = current_admin.get("uid") if current_admin else None
