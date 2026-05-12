@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.database import neo4j_driver, db
 from app.config import GOOGLE_CREDENTIALS
 from app.utils.leiden_utils import apply_leiden_communities
+from app.controllers import report_controller
 
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -673,6 +674,124 @@ def get_master_dataframe(
 
     return legacy_df
 
+def _safe_get_nested(data: dict, keys: list, default=0):
+    try:
+        current = data
+
+        for key in keys:
+            if not isinstance(current, dict):
+                return default
+
+            current = current.get(key)
+
+            if current is None:
+                return default
+
+        return current
+    except Exception:
+        return default
+
+
+def _normalize_export_value(value):
+    if value is None:
+        return ""
+
+    if isinstance(value, (dict, list)):
+        return str(value)
+
+    return value
+
+
+def _get_export_summary_rows(payload) -> list[list]:
+    """
+    Membuat baris ringkasan yang akan ditaruh di atas export CSV
+    atau pada worksheet Summary di Google Sheets.
+
+    Data berasal dari:
+    1. /report/dashboard/stats
+    2. /report/dashboard/google-analytics
+    """
+
+    start_date = getattr(payload, "start_date", None)
+    end_date = getattr(payload, "end_date", None)
+    source = getattr(payload, "source", "app")
+
+    stats_response = report_controller.get_stats_summary()
+    stats_data = stats_response.get("data", {}) if isinstance(stats_response, dict) else {}
+
+    ga_response = report_controller.get_google_analytics_summary(
+        start_date=start_date,
+        end_date=end_date,
+    )
+    ga_data = ga_response.get("data", {}) if isinstance(ga_response, dict) else {}
+    google_analytics = ga_data.get("google_analytics", {})
+    ga_summary = google_analytics.get("summary", {})
+    ga_date_range = google_analytics.get("date_range", {})
+
+    rows = [
+        ["Section", "Metric", "Value"],
+        ["Export Info", "Source", str(source).upper()],
+        ["Export Info", "Start Date", start_date or ga_date_range.get("start_date", "")],
+        ["Export Info", "End Date", end_date or ga_date_range.get("end_date", "")],
+        ["", "", ""],
+
+        ["App Summary", "Total Pengguna App", _safe_get_nested(stats_data, ["users", "total"], 0)],
+        ["App Summary", "User Baru Bulan Ini", _safe_get_nested(stats_data, ["users", "new_this_month"], 0)],
+        ["App Summary", "Total App Posts", _safe_get_nested(stats_data, ["posts", "total"], 0)],
+        ["App Summary", "Total InfoSS Posts", _safe_get_nested(stats_data, ["posts", "total_infoss"], 0)],
+        ["App Summary", "Total KawanSS Posts", _safe_get_nested(stats_data, ["posts", "total_kawanss"], 0)],
+        ["App Summary", "App Posts 30 Hari Terakhir", _safe_get_nested(stats_data, ["posts", "new_30_days"], 0)],
+        ["App Summary", "KawanSS Posts 30 Hari Terakhir", _safe_get_nested(stats_data, ["posts", "new_30_days_kawanss"], 0)],
+        ["", "", ""],
+
+        ["Google Analytics", "Monthly Active User", ga_summary.get("monthly_active_users", 0)],
+        ["Google Analytics", "Monthly New User", ga_summary.get("monthly_new_users", 0)],
+        ["Google Analytics", "Monthly Total User", ga_summary.get("monthly_total_users", 0)],
+        ["Google Analytics", "Monthly Sessions", ga_summary.get("monthly_sessions", 0)],
+        ["Google Analytics", "Monthly Engaged Sessions", ga_summary.get("monthly_engaged_sessions", 0)],
+        ["Google Analytics", "Page Views", ga_summary.get("monthly_screen_page_views", 0)],
+        ["Google Analytics", "Event Count", ga_summary.get("monthly_event_count", 0)],
+        ["Google Analytics", "Average Session Duration Seconds", ga_summary.get("average_session_duration_seconds", 0)],
+    ]
+
+    return [
+        [_normalize_export_value(cell) for cell in row]
+        for row in rows
+    ]
+
+
+def _build_csv_with_summary(summary_rows: list[list], df: pd.DataFrame) -> str:
+    """
+    Format CSV:
+    - Summary di bagian atas
+    - Baris kosong
+    - Dataset export di bawahnya
+    """
+
+    output = []
+
+    for row in summary_rows:
+        output.append(row)
+
+    output.append([])
+    output.append(["DATASET EXPORT"])
+    output.append([])
+
+    output.append(df.columns.tolist())
+
+    safe_df = df.fillna("").astype(str)
+
+    for row in safe_df.values.tolist():
+        output.append(row)
+
+    csv_buffer = pd.DataFrame(output).to_csv(
+        index=False,
+        header=False,
+        encoding="utf-8-sig",
+    )
+
+    return csv_buffer
+
 def _get_export_dataframe(payload) -> pd.DataFrame:
     source_type = payload.source
 
@@ -710,8 +829,13 @@ def export_csv(payload, current_admin=None):
         if df is None or df.empty:
             raise HTTPException(status_code=404, detail="Tidak ada data ditemukan.")
 
-        csv_buffer = df.to_csv(index=False, encoding="utf-8-sig")
-        filename = f"SNA_Dataset_{payload.source.upper()}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        summary_rows = _get_export_summary_rows(payload)
+        csv_buffer = _build_csv_with_summary(summary_rows, df)
+
+        filename = (
+            f"SNA_Report_{payload.source.upper()}_"
+            f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
 
         return StreamingResponse(
             iter([csv_buffer]),
@@ -753,23 +877,31 @@ def export_sheets(payload, current_admin: Optional[Dict[str, Any]] = None):
                 ),
             )
 
-        # Penting:
-        # Ini memakai OAuth access token user, bukan service account.
-        # Jadi file Spreadsheet akan dibuat langsung di Google Drive user yang login.
         gc = get_gspread_user_client(payload.google_access_token)
 
         sh = gc.create(spreadsheet_title)
 
-        worksheet = sh.sheet1
-        worksheet.update_title("Export Data")
+        summary_rows = _get_export_summary_rows(payload)
+
+        summary_worksheet = sh.sheet1
+        summary_worksheet.update_title("Summary")
+        summary_worksheet.clear()
+        summary_worksheet.update(summary_rows, "A1")
+
+        export_worksheet = sh.add_worksheet(
+            title="Export Data",
+            rows=max(len(df) + 5, 100),
+            cols=max(len(df.columns) + 2, 20),
+        )
 
         safe_df = df.fillna("").astype(str)
-        values = [safe_df.columns.tolist()] + safe_df.values.tolist()
+        export_values = [safe_df.columns.tolist()] + safe_df.values.tolist()
 
-        worksheet.clear()
-        worksheet.update(values, "A1")
+        export_worksheet.clear()
+        export_worksheet.update(export_values, "A1")
 
         admin_email = None
+
         if current_admin:
             admin_email = current_admin.get("email")
 
@@ -795,13 +927,18 @@ def export_sheets(payload, current_admin: Optional[Dict[str, Any]] = None):
 
         return {
             "status": "success",
-            "message": "Data berhasil diexport ke Google Sheets dan disimpan di Google Drive user login.",
+            "message": "Data berhasil diexport ke Google Sheets dengan worksheet Summary dan Export Data.",
             "spreadsheet_title": spreadsheet_title,
             "spreadsheet_url": sh.url,
             "source": payload.source,
+            "summary_rows_count": len(summary_rows),
             "rows_count": len(df),
             "columns": df.columns.tolist(),
             "storage_owner": "login_user_drive",
+            "worksheets": [
+                "Summary",
+                "Export Data",
+            ],
             "data": {
                 "id": doc_id,
                 "sheet_url": sh.url,
@@ -835,9 +972,565 @@ def export_sheets(payload, current_admin: Optional[Dict[str, Any]] = None):
             status_code=500,
             detail=f"Export Sheets gagal: {str(api_error)}",
         )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Export Sheets gagal: {str(e)}")
 
+def _first_worksheet(spreadsheet):
+    worksheet = spreadsheet.get_worksheet(0)
+
+    if worksheet is None:
+        worksheet = spreadsheet.add_worksheet(
+            title="Sheet1",
+            rows=100,
+            cols=20,
+        )
+
+    return worksheet
+
+def _format_export_date(value):
+    if not value:
+        return "-"
+
+    return str(value)
+
+def _safe_value(value, default="-"):
+    if value is None:
+        return default
+    if value == "":
+        return default
+    return value
+
+
+def _first_worksheet(spreadsheet):
+    worksheet = spreadsheet.get_worksheet(0)
+
+    if worksheet is None:
+        worksheet = spreadsheet.add_worksheet(
+            title="Sheet1",
+            rows=100,
+            cols=20,
+        )
+
+    return worksheet
+
+
+def _format_export_date(value):
+    if not value:
+        return "-"
+
+    return str(value)
+
+
+def _get_app_summary_rows():
+    summary = {
+        "total_users": "-",
+        "new_users_this_month": "-",
+        "total_app_posts": "-",
+        "total_infoss_posts": "-",
+        "total_kawanss_posts": "-",
+        "app_posts_30_days": "-",
+        "kawanss_posts_30_days": "-",
+    }
+
+    try:
+        with neo4j_driver.session() as session:
+            result = session.run(
+                """
+                MATCH (u:FirebaseUser)
+                RETURN count(u) AS total_users
+                """
+            ).single()
+
+            if result:
+                summary["total_users"] = result.get("total_users", 0)
+    except Exception:
+        pass
+
+    try:
+        with neo4j_driver.session() as session:
+            result = session.run(
+                """
+                MATCH (p)
+                WHERE p:FirebaseInfoss OR p:FirebaseKawanSS
+                RETURN count(p) AS total_app_posts
+                """
+            ).single()
+
+            if result:
+                summary["total_app_posts"] = result.get("total_app_posts", 0)
+    except Exception:
+        pass
+
+    try:
+        with neo4j_driver.session() as session:
+            result = session.run(
+                """
+                MATCH (p:FirebaseInfoss)
+                RETURN count(p) AS total_infoss_posts
+                """
+            ).single()
+
+            if result:
+                summary["total_infoss_posts"] = result.get(
+                    "total_infoss_posts",
+                    0,
+                )
+    except Exception:
+        pass
+
+    try:
+        with neo4j_driver.session() as session:
+            result = session.run(
+                """
+                MATCH (p:FirebaseKawanSS)
+                RETURN count(p) AS total_kawanss_posts
+                """
+            ).single()
+
+            if result:
+                summary["total_kawanss_posts"] = result.get(
+                    "total_kawanss_posts",
+                    0,
+                )
+    except Exception:
+        pass
+
+    try:
+        with neo4j_driver.session() as session:
+            result = session.run(
+                """
+                MATCH (p)
+                WHERE p:FirebaseInfoss OR p:FirebaseKawanSS
+                WITH p, coalesce(p.createdAt, p.uploadDate, p.tanggalUpload, p.date) AS rawDate
+                WITH p, datetime(toString(rawDate)) AS dt
+                WHERE dt >= datetime() - duration({days: 30})
+                RETURN count(p) AS app_posts_30_days
+                """
+            ).single()
+
+            if result:
+                summary["app_posts_30_days"] = result.get(
+                    "app_posts_30_days",
+                    0,
+                )
+    except Exception:
+        pass
+
+    try:
+        with neo4j_driver.session() as session:
+            result = session.run(
+                """
+                MATCH (p:FirebaseKawanSS)
+                WITH p, coalesce(p.createdAt, p.uploadDate, p.tanggalUpload, p.date) AS rawDate
+                WITH p, datetime(toString(rawDate)) AS dt
+                WHERE dt >= datetime() - duration({days: 30})
+                RETURN count(p) AS kawanss_posts_30_days
+                """
+            ).single()
+
+            if result:
+                summary["kawanss_posts_30_days"] = result.get(
+                    "kawanss_posts_30_days",
+                    0,
+                )
+    except Exception:
+        pass
+
+    try:
+        now = datetime.datetime.now()
+        first_day = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        with neo4j_driver.session() as session:
+            result = session.run(
+                """
+                MATCH (u:FirebaseUser)
+                WITH u, coalesce(u.createdAt, u.created_at, u.registeredAt, u.joinedAt) AS rawDate
+                WITH u, datetime(toString(rawDate)) AS dt
+                WHERE dt >= datetime($first_day)
+                RETURN count(u) AS new_users_this_month
+                """,
+                first_day=first_day.isoformat(),
+            ).single()
+
+            if result:
+                summary["new_users_this_month"] = result.get(
+                    "new_users_this_month",
+                    0,
+                )
+    except Exception:
+        pass
+
+    return [
+        ["App Summary", "Total Pengguna App", summary["total_users"]],
+        ["App Summary", "User Baru Bulan Ini", summary["new_users_this_month"]],
+        ["App Summary", "Total App Posts", summary["total_app_posts"]],
+        ["App Summary", "Total InfoSS Posts", summary["total_infoss_posts"]],
+        ["App Summary", "Total KawanSS Posts", summary["total_kawanss_posts"]],
+        ["App Summary", "App Posts 30 Hari Terakhir", summary["app_posts_30_days"]],
+        [
+            "App Summary",
+            "KawanSS Posts 30 Hari Terakhir",
+            summary["kawanss_posts_30_days"],
+        ],
+    ]
+
+def _get_google_analytics_rows():
+    analytics = {
+        "monthly_active_user": "-",
+        "monthly_new_user": "-",
+        "monthly_total_user": "-",
+        "monthly_sessions": "-",
+        "monthly_engaged_sessions": "-",
+        "page_views": "-",
+        "event_count": "-",
+        "average_session_duration_seconds": "-",
+    }
+
+    try:
+        doc = db.collection("google_analytics").document("monthly_summary").get()
+
+        if doc.exists:
+            data = doc.to_dict() or {}
+
+            analytics["monthly_active_user"] = data.get(
+                "monthly_active_user",
+                data.get("monthly_active_users", "-"),
+            )
+            analytics["monthly_new_user"] = data.get(
+                "monthly_new_user",
+                data.get("monthly_new_users", "-"),
+            )
+            analytics["monthly_total_user"] = data.get(
+                "monthly_total_user",
+                data.get("monthly_total_users", "-"),
+            )
+            analytics["monthly_sessions"] = data.get("monthly_sessions", "-")
+            analytics["monthly_engaged_sessions"] = data.get(
+                "monthly_engaged_sessions",
+                "-",
+            )
+            analytics["page_views"] = data.get(
+                "page_views",
+                data.get("monthly_screen_page_views", "-"),
+            )
+            analytics["event_count"] = data.get(
+                "event_count",
+                data.get("monthly_event_count", "-"),
+            )
+            analytics["average_session_duration_seconds"] = data.get(
+                "average_session_duration_seconds",
+                "-",
+            )
+    except Exception:
+        pass
+
+    return [
+        ["Google Analytics", "Monthly Active User", analytics["monthly_active_user"]],
+        ["Google Analytics", "Monthly New User", analytics["monthly_new_user"]],
+        ["Google Analytics", "Monthly Total User", analytics["monthly_total_user"]],
+        ["Google Analytics", "Monthly Sessions", analytics["monthly_sessions"]],
+        [
+            "Google Analytics",
+            "Monthly Engaged Sessions",
+            analytics["monthly_engaged_sessions"],
+        ],
+        ["Google Analytics", "Page Views", analytics["page_views"]],
+        ["Google Analytics", "Event Count", analytics["event_count"]],
+        [
+            "Google Analytics",
+            "Average Session Duration Seconds",
+            analytics["average_session_duration_seconds"],
+        ],
+    ]
+
+def _build_sheet_export_values(payload, df: pd.DataFrame):
+    source = str(payload.source).upper()
+    start_date = _format_export_date(getattr(payload, "start_date", None))
+    end_date = _format_export_date(getattr(payload, "end_date", None))
+
+    safe_df = df.fillna("").astype(str)
+
+    values = []
+
+    values.append(["Section", "Metric", "Value"])
+
+    values.extend(
+        [
+            ["Export Info", "Source", source],
+            ["Export Info", "Start Date", start_date],
+            ["Export Info", "End Date", end_date],
+        ]
+    )
+
+    values.append(["", "", ""])
+
+    if payload.source == "app":
+        values.extend(_get_app_summary_rows())
+    else:
+        values.extend(
+            [
+                ["Instagram Summary", "Total Export Rows", len(df)],
+                ["Instagram Summary", "Total Columns", len(df.columns)],
+            ]
+        )
+
+    values.append(["", "", ""])
+
+    values.extend(_get_google_analytics_rows())
+
+    values.append(["", "", ""])
+    values.append(["Export Data", "Rows Count", len(df)])
+    values.append(["Export Data", "Columns Count", len(df.columns)])
+    values.append(["", "", ""])
+
+    values.append(safe_df.columns.tolist())
+    values.extend(safe_df.values.tolist())
+
+    return values
+
+def export_existing_sheets(payload, current_admin: Optional[Dict[str, Any]] = None):
+    try:
+        df = _get_export_dataframe(payload)
+
+        if df.empty:
+            raise HTTPException(status_code=404, detail="Tidak ada data ditemukan.")
+
+        spreadsheet_id = _extract_spreadsheet_id(
+            getattr(payload, "spreadsheet_id", None),
+            getattr(payload, "spreadsheet_url", None),
+        )
+
+        gc = get_gspread_client()
+
+        try:
+            spreadsheet = gc.open_by_key(spreadsheet_id)
+        except gspread.exceptions.APIError as api_error:
+            error_text = str(api_error)
+
+            if "PERMISSION_DENIED" in error_text or "403" in error_text:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Service Account belum memiliki akses Editor ke Google Sheets tersebut. "
+                        "Silakan share Google Sheets ke email Service Account sebagai Editor."
+                    ),
+                )
+
+            raise
+
+        worksheet = _first_worksheet(spreadsheet)
+
+        values = _build_sheet_export_values(payload, df)
+
+        worksheet.clear()
+
+        needed_rows = max(len(values) + 10, 100)
+        needed_cols = max(max(len(row) for row in values) + 5, 20)
+
+        try:
+            worksheet.resize(rows=needed_rows, cols=needed_cols)
+        except Exception:
+            pass
+
+        worksheet.update(values, "A1")
+
+        now_iso = datetime.datetime.now().isoformat()
+
+        doc_data = {
+            "sheet_id": spreadsheet.id,
+            "sheet_url": spreadsheet.url,
+            "sheet_name": spreadsheet.title,
+            "worksheet_name": worksheet.title,
+            "source_type": payload.source,
+            "rows_count": len(df),
+            "columns": df.columns.tolist(),
+            "created_by_uid": current_admin.get("uid") if current_admin else None,
+            "created_by_email": current_admin.get("email") if current_admin else None,
+            "storage_owner": "user_existing_sheet_service_account_editor",
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+
+        history_saved = True
+        history_error = None
+        doc_id = None
+
+        try:
+            _, doc_ref = db.collection("linked_sheets").add(doc_data)
+            doc_id = doc_ref.id
+        except Exception as history_exception:
+            history_saved = False
+            history_error = str(history_exception)
+
+        return {
+            "status": "success",
+            "message": "Data berhasil diexport ke tab pertama Google Sheets user.",
+            "spreadsheet_id": spreadsheet.id,
+            "spreadsheet_url": spreadsheet.url,
+            "spreadsheet_title": spreadsheet.title,
+            "worksheet_name": worksheet.title,
+            "source": payload.source,
+            "rows_count": len(df),
+            "columns": df.columns.tolist(),
+            "storage_owner": "user_existing_sheet_service_account_editor",
+            "history": {
+                "saved": history_saved,
+                "doc_id": doc_id,
+                "error": history_error,
+            },
+            "data": {
+                "id": doc_id,
+                "sheet_url": spreadsheet.url,
+                "sheet_name": spreadsheet.title,
+                "worksheet_name": worksheet.title,
+            },
+            "debug": {
+                "target_tab": worksheet.title,
+                "values_rows_sent": len(values),
+                "values_cols_sent": max(len(row) for row in values),
+                "data_rows_count": len(df),
+                "history_saved": history_saved,
+                "history_error": history_error,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except gspread.exceptions.APIError as api_error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Export Sheets gagal: {str(api_error)}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Export Sheets gagal: {str(e)}",
+        )
+
+def _normalize_firestore_datetime(value):
+    if value is None:
+        return ""
+
+    try:
+        # Firestore DatetimeWithNanoseconds biasanya punya isoformat()
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+    except Exception:
+        pass
+
+    return str(value)
+
+
+def _history_sort_key(item: Dict[str, Any]):
+    raw_value = item.get("updated_at") or item.get("created_at") or ""
+
+    try:
+        if hasattr(raw_value, "timestamp"):
+            return raw_value.timestamp()
+    except Exception:
+        pass
+
+    try:
+        raw_str = str(raw_value)
+        parsed = datetime.datetime.fromisoformat(raw_str.replace("Z", "+00:00"))
+        return parsed.timestamp()
+    except Exception:
+        return 0
+
+
+def get_exported_sheets_history(current_admin: Optional[Dict[str, Any]] = None):
+    try:
+        current_uid = current_admin.get("uid") if current_admin else None
+        current_email = current_admin.get("email") if current_admin else None
+
+        docs = db.collection("linked_sheets").stream()
+
+        items = []
+
+        for doc in docs:
+            data = doc.to_dict() or {}
+
+            created_by_uid = data.get("created_by_uid")
+            created_by_email = data.get("created_by_email")
+
+            is_owner = False
+
+            if current_uid and created_by_uid == current_uid:
+                is_owner = True
+
+            if current_email and created_by_email == current_email:
+                is_owner = True
+
+            # Debug fallback:
+            # Supaya data lama yang belum punya owner tetap muncul dulu.
+            if not created_by_uid and not created_by_email:
+                is_owner = True
+
+            if not is_owner:
+                continue
+
+            created_at_raw = data.get("created_at")
+            updated_at_raw = data.get("updated_at")
+
+            items.append(
+                {
+                    "id": doc.id,
+                    "sheet_id": data.get("sheet_id", ""),
+                    "sheet_url": data.get("sheet_url", ""),
+                    "sheet_name": data.get("sheet_name", ""),
+                    "spreadsheet_title": data.get("sheet_name", ""),
+                    "worksheet_name": data.get("worksheet_name", ""),
+                    "source_type": data.get("source_type", ""),
+                    "source": data.get("source_type", ""),
+                    "rows_count": data.get("rows_count", 0),
+                    "columns": data.get("columns", []),
+                    "storage_owner": data.get("storage_owner", ""),
+                    "created_by_uid": created_by_uid,
+                    "created_by_email": created_by_email,
+
+                    # Penting:
+                    # Return ke frontend selalu string, jangan object Firestore timestamp.
+                    "created_at": _normalize_firestore_datetime(created_at_raw),
+                    "updated_at": _normalize_firestore_datetime(updated_at_raw),
+
+                    # Internal sort value, nanti dihapus sebelum return.
+                    "_sort_created_at": created_at_raw,
+                    "_sort_updated_at": updated_at_raw,
+                }
+            )
+
+        items.sort(
+            key=lambda item: _history_sort_key(
+                {
+                    "created_at": item.get("_sort_created_at"),
+                    "updated_at": item.get("_sort_updated_at"),
+                }
+            ),
+            reverse=True,
+        )
+
+        for item in items:
+            item.pop("_sort_created_at", None)
+            item.pop("_sort_updated_at", None)
+
+        return {
+            "status": "success",
+            "message": "Riwayat export Google Sheets berhasil dimuat.",
+            "total": len(items),
+            "current_user": {
+                "uid": current_uid,
+                "email": current_email,
+            },
+            "data": items,
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Gagal memuat riwayat export Google Sheets: {str(e)}",
+        )
+           
 def link_existing_sheet(payload: Dict[str, Any], current_admin: Optional[Dict[str, Any]] = None):
     """
     Menghubungkan data export SNA ke Google Spreadsheet yang sudah dibuat user.

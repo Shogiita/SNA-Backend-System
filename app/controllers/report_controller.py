@@ -17,15 +17,22 @@ from fastapi import HTTPException, Response
 from app.database import neo4j_driver
 from collections import Counter
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
-from google.analytics.data_v1beta.types import Dimension, Metric, RunRealtimeReportRequest, MinuteRange
+from google.analytics.data_v1beta.types import (
+    DateRange,
+    Dimension,
+    Metric,
+    RunReportRequest,
+    RunRealtimeReportRequest,
+    FilterExpression,
+    Filter,
+    OrderBy,
+)
 from google.oauth2 import service_account
 from app import config
 from app.utils.sna_filter_utils import is_ignored_app_user, is_ignored_instagram_user, normalize_hashtag, is_ignored_hashtag
 from google.analytics.data_v1beta.types import (
-    RunRealtimeReportRequest, 
-    Metric, 
-    FilterExpression, 
-    Filter
+    FilterExpression,
+    Filter,
 )
 
 
@@ -70,6 +77,250 @@ def get_ga_credentials():
         "auth_provider_x509_cert_url": os.getenv("GCP_AUTH_PROVIDER_CERT_URL"),
         "client_x509_cert_url": os.getenv("GCP_CLIENT_CERT_URL")
     })
+
+def _parse_ga_metric_value(value):
+    try:
+        if value is None:
+            return 0
+
+        value = str(value)
+
+        if "." in value:
+            return round(float(value), 2)
+
+        return int(value)
+    except Exception:
+        return value
+
+
+def _format_ga_date(value: str) -> str:
+    try:
+        if not value or len(value) != 8:
+            return value
+
+        return f"{value[0:4]}-{value[4:6]}-{value[6:8]}"
+    except Exception:
+        return value
+
+
+def _run_ga_report(
+    dimensions: list[str],
+    metrics: list[str],
+    start_date: str,
+    end_date: str,
+    limit: int = 10,
+    order_by_metric: str | None = None,
+):
+    property_id = os.getenv("GA_PROPERTY_ID")
+
+    if not property_id:
+        raise ValueError("GA_PROPERTY_ID tidak ditemukan di environment variables.")
+
+    credentials = get_ga_credentials()
+    client = BetaAnalyticsDataClient(credentials=credentials)
+
+    request_data = {
+        "property": f"properties/{property_id}",
+        "date_ranges": [
+            DateRange(
+                start_date=start_date,
+                end_date=end_date,
+            )
+        ],
+        "metrics": [
+            Metric(name=metric_name)
+            for metric_name in metrics
+        ],
+        "limit": limit,
+    }
+
+    if dimensions:
+        request_data["dimensions"] = [
+            Dimension(name=dimension_name)
+            for dimension_name in dimensions
+        ]
+
+    if order_by_metric:
+        request_data["order_bys"] = [
+            OrderBy(
+                metric=OrderBy.MetricOrderBy(
+                    metric_name=order_by_metric,
+                ),
+                desc=True,
+            )
+        ]
+
+    response = client.run_report(
+        RunReportRequest(**request_data)
+    )
+
+    rows = []
+
+    for row in response.rows:
+        item = {}
+
+        for index, dimension_name in enumerate(dimensions):
+            value = row.dimension_values[index].value
+
+            if dimension_name == "date":
+                value = _format_ga_date(value)
+
+            item[dimension_name] = value
+
+        for index, metric_name in enumerate(metrics):
+            value = row.metric_values[index].value
+            item[metric_name] = _parse_ga_metric_value(value)
+
+        rows.append(item)
+
+    return rows
+def _format_ga_date(value: str) -> str:
+    try:
+        if not value or len(value) != 8:
+            return value
+
+        return f"{value[0:4]}-{value[4:6]}-{value[6:8]}"
+    except Exception:
+        return value
+
+
+def _run_ga_report(
+    dimensions: list[str],
+    metrics: list[str],
+    start_date: str,
+    end_date: str,
+    limit: int = 10,
+    order_by_metric: str | None = None,
+):
+    property_id = os.getenv("GA_PROPERTY_ID")
+
+    if not property_id:
+        raise ValueError("GA_PROPERTY_ID tidak ditemukan di environment variables.")
+
+    credentials = get_ga_credentials()
+    client = BetaAnalyticsDataClient(credentials=credentials)
+
+    request_data = {
+        "property": f"properties/{property_id}",
+        "date_ranges": [
+            DateRange(
+                start_date=start_date,
+                end_date=end_date,
+            )
+        ],
+        "metrics": [
+            Metric(name=metric_name)
+            for metric_name in metrics
+        ],
+        "limit": limit,
+    }
+
+    if dimensions:
+        request_data["dimensions"] = [
+            Dimension(name=dimension_name)
+            for dimension_name in dimensions
+        ]
+
+    if order_by_metric:
+        request_data["order_bys"] = [
+            OrderBy(
+                metric=OrderBy.MetricOrderBy(
+                    metric_name=order_by_metric,
+                ),
+                desc=True,
+            )
+        ]
+
+    response = client.run_report(
+        RunReportRequest(**request_data)
+    )
+
+    rows = []
+
+    for row in response.rows:
+        item = {}
+
+        for index, dimension_name in enumerate(dimensions):
+            value = row.dimension_values[index].value
+
+            if dimension_name == "date":
+                value = _format_ga_date(value)
+
+            item[dimension_name] = value
+
+        for index, metric_name in enumerate(metrics):
+            value = row.metric_values[index].value
+            item[metric_name] = _parse_ga_metric_value(value)
+
+        rows.append(item)
+
+    return rows
+
+def _run_ga_report(
+    dimensions: list[str],
+    metrics: list[str],
+    start_date: str,
+    end_date: str,
+    limit: int = 10,
+    order_by_metric: str | None = None,
+):
+    property_id = os.getenv("GA_PROPERTY_ID")
+
+    if not property_id:
+        raise ValueError("GA_PROPERTY_ID tidak ditemukan di environment variables.")
+
+    credentials = get_ga_credentials()
+    client = BetaAnalyticsDataClient(credentials=credentials)
+
+    request_kwargs = {
+        "property": f"properties/{property_id}",
+        "date_ranges": [
+            DateRange(
+                start_date=start_date,
+                end_date=end_date,
+            )
+        ],
+        "metrics": [Metric(name=name) for name in metrics],
+        "limit": limit,
+    }
+
+    if dimensions:
+        request_kwargs["dimensions"] = [
+            Dimension(name=name) for name in dimensions
+        ]
+
+    if order_by_metric:
+        request_kwargs["order_bys"] = [
+            OrderBy(
+                metric=OrderBy.MetricOrderBy(metric_name=order_by_metric),
+                desc=True,
+            )
+        ]
+
+    response = client.run_report(RunReportRequest(**request_kwargs))
+
+    rows = []
+
+    for row in response.rows:
+        item = {}
+
+        for index, dimension in enumerate(dimensions):
+            item[dimension] = row.dimension_values[index].value
+
+        for index, metric in enumerate(metrics):
+            raw_value = row.metric_values[index].value
+
+            try:
+                if "." in raw_value:
+                    item[metric] = round(float(raw_value), 2)
+                else:
+                    item[metric] = int(raw_value)
+            except Exception:
+                item[metric] = raw_value
+
+        rows.append(item)
+
+    return rows
 
 def get_first_day_of_last_month(dt):
     first_day_of_current_month = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -789,10 +1040,13 @@ def get_network_metrics_summary(source: str = "app"):
             "message": str(e)
         }
 
-def get_live_analytics_summary():
+def get_live_analytics_summary(
+    start_date: str | None = None,
+    end_date: str | None = None,
+):
     try:
         property_id = os.getenv("GA_PROPERTY_ID")
-        
+
         if not property_id:
             raise ValueError("GA_PROPERTY_ID tidak ditemukan di environment variables.")
 
@@ -816,8 +1070,7 @@ def get_live_analytics_summary():
                 filter=Filter(
                     field_name="minutesAgo",
                     in_list_filter=Filter.InListFilter(
-                        # Filter data untuk 0, 1, 2, 3, dan 4 menit yang lalu
-                        values=["00", "01", "02", "03", "04"] 
+                        values=["00", "01", "02", "03", "04"]
                     )
                 )
             )
@@ -828,9 +1081,62 @@ def get_live_analytics_summary():
         if response_5.rows:
             active_users_5_min = int(response_5.rows[0].metric_values[0].value)
 
-        # Konversi ke string atau kembalikan "Tidak ada" sesuai instruksi
-        val_30_min = str(active_users_30_min) if active_users_30_min > 0 else "Tidak ada"
-        val_5_min = str(active_users_5_min) if active_users_5_min > 0 else "Tidak ada"
+        now = datetime.now()
+
+        if not start_date:
+            start_date = now.replace(day=1).strftime("%Y-%m-%d")
+
+        if not end_date:
+            end_date = now.strftime("%Y-%m-%d")
+
+        overview_rows = _run_ga_report(
+            dimensions=[],
+            metrics=[
+                "activeUsers",
+                "newUsers",
+                "totalUsers",
+                "sessions",
+                "engagedSessions",
+                "screenPageViews",
+                "eventCount",
+                "averageSessionDuration",
+            ],
+            start_date=start_date,
+            end_date=end_date,
+            limit=1,
+        )
+
+        overview = overview_rows[0] if overview_rows else {}
+
+        users_by_date = _run_ga_report(
+            dimensions=["date"],
+            metrics=[
+                "activeUsers",
+                "newUsers",
+                "sessions",
+            ],
+            start_date=start_date,
+            end_date=end_date,
+            limit=100,
+        )
+
+        users_by_country = _run_ga_report(
+            dimensions=["country"],
+            metrics=["activeUsers"],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="activeUsers",
+        )
+
+        users_by_city = _run_ga_report(
+            dimensions=["city"],
+            metrics=["activeUsers"],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="activeUsers",
+        )
 
         return {
             "status": "success",
@@ -838,14 +1144,300 @@ def get_live_analytics_summary():
                 "integrations": {
                     "google_analytics": {
                         "status": "connected",
-                        "active_users_last_30_min": val_30_min,
-                        "active_users_last_5_min": val_5_min
+                        "property_id": property_id,
+                        "realtime": {
+                            "active_users_last_30_min": active_users_30_min,
+                            "active_users_last_5_min": active_users_5_min,
+                        },
+                        "date_range": {
+                            "start_date": start_date,
+                            "end_date": end_date,
+                        },
+                        "summary": {
+                            "monthly_active_users": overview.get("activeUsers", 0),
+                            "monthly_new_users": overview.get("newUsers", 0),
+                            "monthly_total_users": overview.get("totalUsers", 0),
+                            "monthly_sessions": overview.get("sessions", 0),
+                            "monthly_engaged_sessions": overview.get("engagedSessions", 0),
+                            "monthly_screen_page_views": overview.get("screenPageViews", 0),
+                            "monthly_event_count": overview.get("eventCount", 0),
+                            "average_session_duration_seconds": overview.get(
+                                "averageSessionDuration",
+                                0,
+                            ),
+                        },
+                        "users_by_date": users_by_date,
+                        "users_by_country": users_by_country,
+                        "users_by_city": users_by_city,
                     }
                 }
             }
         }
+
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "message": str(e),
+        }
+
+def get_google_analytics_summary(
+    start_date: str | None = None,
+    end_date: str | None = None,
+):
+    try:
+        property_id = os.getenv("GA_PROPERTY_ID")
+
+        if not property_id:
+            raise ValueError("GA_PROPERTY_ID tidak ditemukan di environment variables.")
+
+        now = datetime.now()
+
+        if not start_date:
+            start_date = now.replace(day=1).strftime("%Y-%m-%d")
+
+        if not end_date:
+            end_date = now.strftime("%Y-%m-%d")
+
+        overview_rows = _run_ga_report(
+            dimensions=[],
+            metrics=[
+                "activeUsers",
+                "newUsers",
+                "totalUsers",
+                "sessions",
+                "engagedSessions",
+                "screenPageViews",
+                "eventCount",
+                "averageSessionDuration",
+            ],
+            start_date=start_date,
+            end_date=end_date,
+            limit=1,
+        )
+
+        overview = overview_rows[0] if overview_rows else {}
+
+        users_by_date = _run_ga_report(
+            dimensions=["date"],
+            metrics=[
+                "activeUsers",
+                "newUsers",
+                "sessions",
+            ],
+            start_date=start_date,
+            end_date=end_date,
+            limit=100,
+        )
+
+        users_by_country = _run_ga_report(
+            dimensions=["country"],
+            metrics=["activeUsers"],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="activeUsers",
+        )
+
+        users_by_city = _run_ga_report(
+            dimensions=["city"],
+            metrics=["activeUsers"],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="activeUsers",
+        )
+
+        return {
+            "status": "success",
+            "data": {
+                "google_analytics": {
+                    "status": "connected",
+                    "date_range": {
+                        "start_date": start_date,
+                        "end_date": end_date,
+                    },
+                    "summary": {
+                        "monthly_active_users": overview.get("activeUsers", 0),
+                        "monthly_new_users": overview.get("newUsers", 0),
+                        "monthly_total_users": overview.get("totalUsers", 0),
+                        "monthly_sessions": overview.get("sessions", 0),
+                        "monthly_engaged_sessions": overview.get("engagedSessions", 0),
+                        "monthly_screen_page_views": overview.get("screenPageViews", 0),
+                        "monthly_event_count": overview.get("eventCount", 0),
+                        "average_session_duration_seconds": overview.get(
+                            "averageSessionDuration",
+                            0,
+                        ),
+                    },
+                    "users_by_date": users_by_date,
+                    "users_by_country": users_by_country,
+                    "users_by_city": users_by_city,
+                }
+            }
+        }
+
+    except Exception as e:
+        traceback.print_exc()
+
+        return {
+            "status": "error",
+            "message": str(e),
+        }
+
+def get_google_analytics_report_summary(
+    start_date: str | None = None,
+    end_date: str | None = None,
+):
+    try:
+        now = datetime.now()
+
+        if not start_date:
+            start_date = now.replace(day=1).strftime("%Y-%m-%d")
+
+        if not end_date:
+            end_date = now.strftime("%Y-%m-%d")
+
+        overview_rows = _run_ga_report(
+            dimensions=[],
+            metrics=[
+                "activeUsers",
+                "newUsers",
+                "totalUsers",
+                "sessions",
+                "engagedSessions",
+                "screenPageViews",
+                "eventCount",
+                "averageSessionDuration",
+            ],
+            start_date=start_date,
+            end_date=end_date,
+            limit=1,
+        )
+
+        users_by_date = _run_ga_report(
+            dimensions=["date"],
+            metrics=[
+                "activeUsers",
+                "newUsers",
+                "sessions",
+            ],
+            start_date=start_date,
+            end_date=end_date,
+            limit=100,
+            order_by_metric="activeUsers",
+        )
+
+        users_by_platform = _run_ga_report(
+            dimensions=["platform"],
+            metrics=[
+                "activeUsers",
+                "newUsers",
+            ],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="activeUsers",
+        )
+
+        users_by_country = _run_ga_report(
+            dimensions=["country"],
+            metrics=["activeUsers"],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="activeUsers",
+        )
+
+        users_by_city = _run_ga_report(
+            dimensions=["city"],
+            metrics=["activeUsers"],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="activeUsers",
+        )
+
+        users_by_language = _run_ga_report(
+            dimensions=["language"],
+            metrics=["activeUsers"],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="activeUsers",
+        )
+
+        users_by_channel = _run_ga_report(
+            dimensions=["firstUserPrimaryChannelGroup"],
+            metrics=["newUsers"],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="newUsers",
+        )
+
+        sessions_by_channel = _run_ga_report(
+            dimensions=["sessionDefaultChannelGroup"],
+            metrics=["sessions"],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="sessions",
+        )
+
+        top_events = _run_ga_report(
+            dimensions=["eventName"],
+            metrics=["eventCount"],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="eventCount",
+        )
+
+        top_screens = _run_ga_report(
+            dimensions=["unifiedScreenName"],
+            metrics=["screenPageViews"],
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+            order_by_metric="screenPageViews",
+        )
+
+        return {
+            "status": "success",
+            "date_range": {
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            "data": {
+                "overview": overview_rows[0] if overview_rows else {
+                    "activeUsers": 0,
+                    "newUsers": 0,
+                    "totalUsers": 0,
+                    "sessions": 0,
+                    "engagedSessions": 0,
+                    "screenPageViews": 0,
+                    "eventCount": 0,
+                    "averageSessionDuration": 0,
+                },
+                "users_by_date": users_by_date,
+                "users_by_platform": users_by_platform,
+                "users_by_country": users_by_country,
+                "users_by_city": users_by_city,
+                "users_by_language": users_by_language,
+                "users_by_channel": users_by_channel,
+                "sessions_by_channel": sessions_by_channel,
+                "top_events": top_events,
+                "top_screens": top_screens,
+            },
+        }
+
+    except Exception as e:
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "message": str(e),
+        }
 
 def get_stats_summary():
     try:
@@ -2130,4 +2722,506 @@ def get_stats_summary():
                 },
                 "monthly_report": {}
             }
+        }
+
+def _get_first_item(items):
+    if isinstance(items, list) and len(items) > 0:
+        return items[0]
+
+    return None
+
+
+def _get_metric_value(item, metric_name: str):
+    if not item:
+        return 0
+
+    metrics = item.get("metrics", {})
+
+    try:
+        return float(metrics.get(metric_name, 0))
+    except Exception:
+        return 0
+
+
+def _get_actor_name(item):
+    if not item:
+        return "-"
+
+    return (
+        item.get("label")
+        or item.get("username")
+        or item.get("name")
+        or item.get("id")
+        or "-"
+    )
+
+
+def _build_network_summary_narrative(source: str, metrics_response: dict):
+    data = metrics_response.get("data", {})
+
+    top_centrality = data.get("top_10_centrality", {})
+    shortest_path_metrics = data.get("shortest_path_metrics", {})
+    clique_metrics = data.get("clique_metrics", {})
+
+    degree_top = _get_first_item(top_centrality.get("degree", []))
+    betweenness_top = _get_first_item(top_centrality.get("betweenness", []))
+    closeness_top = _get_first_item(top_centrality.get("closeness", []))
+    eigenvector_top = _get_first_item(top_centrality.get("eigenvector", []))
+
+    degree_name = _get_actor_name(degree_top)
+    betweenness_name = _get_actor_name(betweenness_top)
+    closeness_name = _get_actor_name(closeness_top)
+    eigenvector_name = _get_actor_name(eigenvector_top)
+
+    degree_value = _get_metric_value(degree_top, "degree")
+    betweenness_value = _get_metric_value(betweenness_top, "betweenness")
+    closeness_value = _get_metric_value(closeness_top, "closeness")
+    eigenvector_value = _get_metric_value(eigenvector_top, "eigenvector")
+
+    global_averages = shortest_path_metrics.get("global_averages", {})
+    average_distance = global_averages.get("average_of_average_degrees", 0)
+    average_diameter = global_averages.get("average_of_network_diameters", 0)
+    average_connected_users = global_averages.get("average_of_connected_users", 0)
+
+    clique_global = clique_metrics.get("global_metrics", {})
+    total_cliques = clique_global.get("total_cliques", 0)
+    largest_clique_size = clique_global.get("largest_clique_size", 0)
+
+    top_paths = shortest_path_metrics.get("top_10_paths", [])
+
+    source_label = "Instagram" if source == "instagram" else "aplikasi Suara Surabaya"
+
+    if not degree_top and not betweenness_top and not closeness_top and not eigenvector_top:
+        return {
+            "overview": (
+                f"Jaringan sosial pada {source_label} belum memiliki data interaksi yang cukup "
+                f"untuk menghasilkan analisis centrality yang kuat. Hal ini dapat terjadi karena "
+                f"jumlah interaksi antar pengguna masih sedikit atau data graf belum membentuk "
+                f"koneksi yang signifikan."
+            ),
+            "degree_centrality": (
+                "Degree centrality belum dapat menunjukkan aktor dominan karena belum ditemukan "
+                "pengguna dengan koneksi langsung yang cukup kuat."
+            ),
+            "betweenness_centrality": (
+                "Betweenness centrality belum menunjukkan aktor penghubung utama karena struktur "
+                "jaringan belum memiliki jalur penghubung yang jelas antar kelompok pengguna."
+            ),
+            "closeness_centrality": (
+                "Closeness centrality belum dapat menunjukkan aktor yang paling dekat dengan aktor "
+                "lain karena konektivitas jaringan masih terbatas."
+            ),
+            "eigenvector_centrality": (
+                "Eigenvector centrality belum dapat menunjukkan aktor berpengaruh karena belum "
+                "terdapat pola hubungan yang cukup kuat dengan aktor penting lainnya."
+            ),
+            "geodesic_path": (
+                "Geodesic path belum dapat dianalisis secara optimal karena jalur antar aktor dalam "
+                "jaringan masih terbatas."
+            ),
+            "clique": (
+                "Clique belum terdeteksi. Artinya, belum ditemukan kelompok pengguna yang saling "
+                "terhubung secara langsung dalam bentuk sub-jaringan yang rapat."
+            ),
+            "conclusion": (
+                f"Secara umum, jaringan sosial pada {source_label} masih belum cukup padat untuk "
+                f"menunjukkan pola pengaruh, aktor kunci, atau komunitas yang kuat."
+            ),
+        }
+
+    overview = (
+        f"Berdasarkan hasil analisis jaringan sosial pada {source_label}, terlihat bahwa struktur "
+        f"jaringan terbentuk dari aktivitas interaksi antar pengguna. Interaksi tersebut membentuk "
+        f"pola hubungan yang dapat dianalisis melalui degree centrality, betweenness centrality, "
+        f"closeness centrality, eigenvector centrality, geodesic path, dan clique."
+    )
+
+    degree_summary = (
+        f"Pada metrik degree centrality, aktor dengan nilai tertinggi adalah {degree_name} "
+        f"dengan nilai {degree_value}. Hal ini menunjukkan bahwa aktor tersebut memiliki jumlah "
+        f"koneksi langsung paling tinggi dibandingkan pengguna lain. Dalam konteks jaringan sosial, "
+        f"aktor ini dapat dianggap sebagai pengguna yang aktif atau populer karena banyak terlibat "
+        f"dalam interaksi langsung."
+    )
+
+    betweenness_summary = (
+        f"Pada metrik betweenness centrality, aktor dengan nilai tertinggi adalah {betweenness_name} "
+        f"dengan nilai {betweenness_value}. Nilai ini menunjukkan bahwa aktor tersebut memiliki peran "
+        f"sebagai penghubung antar pengguna atau antar kelompok dalam jaringan. Semakin tinggi nilai "
+        f"betweenness, semakin besar kemungkinan aktor tersebut menjadi perantara dalam penyebaran "
+        f"informasi."
+    )
+
+    closeness_summary = (
+        f"Pada metrik closeness centrality, aktor dengan nilai tertinggi adalah {closeness_name} "
+        f"dengan nilai {closeness_value}. Hal ini menunjukkan bahwa aktor tersebut memiliki jarak "
+        f"yang relatif lebih dekat ke aktor-aktor lain dalam jaringan. Aktor dengan closeness tinggi "
+        f"berpotensi menjangkau pengguna lain secara lebih cepat."
+    )
+
+    eigenvector_summary = (
+        f"Pada metrik eigenvector centrality, aktor dengan nilai tertinggi adalah {eigenvector_name} "
+        f"dengan nilai {eigenvector_value}. Metrik ini menunjukkan bahwa aktor tersebut tidak hanya "
+        f"memiliki banyak koneksi, tetapi juga terhubung dengan aktor lain yang memiliki pengaruh "
+        f"tinggi. Dengan demikian, aktor ini dapat dipandang sebagai salah satu aktor paling berpengaruh "
+        f"dalam struktur jaringan."
+    )
+
+    if top_paths:
+        geodesic_summary = (
+            f"Analisis geodesic path menunjukkan bahwa rata-rata jarak sosial dalam jaringan adalah "
+            f"sekitar {average_distance} langkah, dengan rata-rata diameter jaringan sebesar "
+            f"{average_diameter}. Nilai ini menggambarkan seberapa jauh pengguna harus melewati "
+            f"aktor lain untuk dapat terhubung. Semakin kecil jarak geodesic, semakin cepat informasi "
+            f"dapat menyebar di dalam jaringan."
+        )
+    else:
+        geodesic_summary = (
+            "Analisis geodesic path belum menemukan sampel jalur yang cukup kuat antar aktor. "
+            "Hal ini dapat menunjukkan bahwa jaringan masih terfragmentasi atau sebagian besar "
+            "pengguna belum saling terhubung secara langsung maupun tidak langsung."
+        )
+
+    if total_cliques > 0:
+        clique_summary = (
+            f"Pada analisis clique, ditemukan {total_cliques} kelompok clique dalam jaringan. "
+            f"Clique terbesar memiliki {largest_clique_size} anggota. Hal ini menunjukkan adanya "
+            f"sub-kelompok pengguna yang saling terhubung secara langsung. Kelompok seperti ini "
+            f"dapat menjadi indikasi adanya komunitas kecil yang memiliki intensitas interaksi tinggi."
+        )
+    else:
+        clique_summary = (
+            "Pada analisis clique, belum ditemukan kelompok pengguna yang membentuk hubungan saling "
+            "terhubung secara penuh. Hal ini menunjukkan bahwa interaksi pengguna belum membentuk "
+            "sub-komunitas yang benar-benar rapat."
+        )
+
+    conclusion = (
+        f"Secara keseluruhan, jaringan sosial pada {source_label} menunjukkan bahwa aktor dengan "
+        f"koneksi langsung tinggi dapat diidentifikasi melalui degree centrality, aktor penghubung "
+        f"dapat dilihat melalui betweenness centrality, aktor yang paling mudah menjangkau jaringan "
+        f"dapat dilihat melalui closeness centrality, dan aktor berpengaruh dapat dilihat melalui "
+        f"eigenvector centrality. Hasil ini dapat digunakan untuk memahami pola interaksi, menemukan "
+        f"aktor kunci, serta melihat potensi terbentuknya komunitas dalam jaringan sosial."
+    )
+
+    return {
+        "overview": overview,
+        "degree_centrality": degree_summary,
+        "betweenness_centrality": betweenness_summary,
+        "closeness_centrality": closeness_summary,
+        "eigenvector_centrality": eigenvector_summary,
+        "geodesic_path": geodesic_summary,
+        "clique": clique_summary,
+        "conclusion": conclusion,
+        "key_findings": {
+            "most_connected_actor": {
+                "name": degree_name,
+                "metric": "degree_centrality",
+                "value": degree_value,
+            },
+            "main_bridge_actor": {
+                "name": betweenness_name,
+                "metric": "betweenness_centrality",
+                "value": betweenness_value,
+            },
+            "closest_actor": {
+                "name": closeness_name,
+                "metric": "closeness_centrality",
+                "value": closeness_value,
+            },
+            "most_influential_actor": {
+                "name": eigenvector_name,
+                "metric": "eigenvector_centrality",
+                "value": eigenvector_value,
+            },
+            "network_distance": {
+                "average_distance": average_distance,
+                "average_diameter": average_diameter,
+                "average_connected_users": average_connected_users,
+            },
+            "community_structure": {
+                "total_cliques": total_cliques,
+                "largest_clique_size": largest_clique_size,
+            },
+        },
+    }
+
+
+def get_network_analysis_summary(source: str = "app"):
+    try:
+        source = (source or "app").strip().lower()
+
+        if source not in ["app", "instagram"]:
+            raise HTTPException(
+                status_code=400,
+                detail="source harus bernilai 'app' atau 'instagram'."
+            )
+
+        metrics_response = get_network_metrics_summary(source)
+
+        if metrics_response.get("status") != "success":
+            return {
+                "status": "error",
+                "source_active": source,
+                "message": "Gagal membuat summary karena data metrik jaringan tidak berhasil diproses.",
+                "detail": metrics_response.get("message"),
+            }
+
+        narrative = _build_network_summary_narrative(
+            source=source,
+            metrics_response=metrics_response,
+        )
+
+        return {
+            "status": "success",
+            "source_active": source,
+            "data": {
+                "analysis_summary": narrative,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+
+        return {
+            "status": "error",
+            "source_active": source,
+            "message": str(e),
+        }
+    data = metrics_response.get("data", {})
+
+    top_centrality = data.get("top_10_centrality", {})
+    shortest_path_metrics = data.get("shortest_path_metrics", {})
+    clique_metrics = data.get("clique_metrics", {})
+
+    degree_top = _get_first_item(top_centrality.get("degree", []))
+    betweenness_top = _get_first_item(top_centrality.get("betweenness", []))
+    closeness_top = _get_first_item(top_centrality.get("closeness", []))
+    eigenvector_top = _get_first_item(top_centrality.get("eigenvector", []))
+
+    degree_name = _get_actor_name(degree_top)
+    betweenness_name = _get_actor_name(betweenness_top)
+    closeness_name = _get_actor_name(closeness_top)
+    eigenvector_name = _get_actor_name(eigenvector_top)
+
+    degree_value = _get_metric_value(degree_top, "degree")
+    betweenness_value = _get_metric_value(betweenness_top, "betweenness")
+    closeness_value = _get_metric_value(closeness_top, "closeness")
+    eigenvector_value = _get_metric_value(eigenvector_top, "eigenvector")
+
+    global_averages = shortest_path_metrics.get("global_averages", {})
+    average_distance = global_averages.get("average_of_average_degrees", 0)
+    average_diameter = global_averages.get("average_of_network_diameters", 0)
+    average_connected_users = global_averages.get("average_of_connected_users", 0)
+
+    clique_global = clique_metrics.get("global_metrics", {})
+    total_cliques = clique_global.get("total_cliques", 0)
+    largest_clique_size = clique_global.get("largest_clique_size", 0)
+
+    top_paths = shortest_path_metrics.get("top_10_paths", [])
+
+    source_label = "Instagram" if source == "instagram" else "aplikasi Suara Surabaya"
+
+    if not degree_top and not betweenness_top and not closeness_top and not eigenvector_top:
+        return {
+            "overview": (
+                f"Jaringan sosial pada {source_label} belum memiliki data interaksi yang cukup "
+                f"untuk menghasilkan analisis centrality yang kuat. Hal ini dapat terjadi karena "
+                f"jumlah interaksi antar pengguna masih sedikit atau data graf belum membentuk "
+                f"koneksi yang signifikan."
+            ),
+            "degree_centrality": (
+                "Degree centrality belum dapat menunjukkan aktor dominan karena belum ditemukan "
+                "pengguna dengan koneksi langsung yang cukup kuat."
+            ),
+            "betweenness_centrality": (
+                "Betweenness centrality belum menunjukkan aktor penghubung utama karena struktur "
+                "jaringan belum memiliki jalur penghubung yang jelas antar kelompok pengguna."
+            ),
+            "closeness_centrality": (
+                "Closeness centrality belum dapat menunjukkan aktor yang paling dekat dengan aktor "
+                "lain karena konektivitas jaringan masih terbatas."
+            ),
+            "eigenvector_centrality": (
+                "Eigenvector centrality belum dapat menunjukkan aktor berpengaruh karena belum "
+                "terdapat pola hubungan yang cukup kuat dengan aktor penting lainnya."
+            ),
+            "geodesic_path": (
+                "Geodesic path belum dapat dianalisis secara optimal karena jalur antar aktor dalam "
+                "jaringan masih terbatas."
+            ),
+            "clique": (
+                "Clique belum terdeteksi. Artinya, belum ditemukan kelompok pengguna yang saling "
+                "terhubung secara langsung dalam bentuk sub-jaringan yang rapat."
+            ),
+            "conclusion": (
+                f"Secara umum, jaringan sosial pada {source_label} masih belum cukup padat untuk "
+                f"menunjukkan pola pengaruh, aktor kunci, atau komunitas yang kuat."
+            ),
+        }
+
+    overview = (
+        f"Berdasarkan hasil analisis jaringan sosial pada {source_label}, terlihat bahwa struktur "
+        f"jaringan terbentuk dari aktivitas interaksi antar pengguna. Interaksi tersebut membentuk "
+        f"pola hubungan yang dapat dianalisis melalui degree centrality, betweenness centrality, "
+        f"closeness centrality, eigenvector centrality, geodesic path, dan clique."
+    )
+
+    degree_summary = (
+        f"Pada metrik degree centrality, aktor dengan nilai tertinggi adalah {degree_name} "
+        f"dengan nilai {degree_value}. Hal ini menunjukkan bahwa aktor tersebut memiliki jumlah "
+        f"koneksi langsung paling tinggi dibandingkan pengguna lain. Dalam konteks jaringan sosial, "
+        f"aktor ini dapat dianggap sebagai pengguna yang aktif atau populer karena banyak terlibat "
+        f"dalam interaksi langsung."
+    )
+
+    betweenness_summary = (
+        f"Pada metrik betweenness centrality, aktor dengan nilai tertinggi adalah {betweenness_name} "
+        f"dengan nilai {betweenness_value}. Nilai ini menunjukkan bahwa aktor tersebut memiliki peran "
+        f"sebagai penghubung antar pengguna atau antar kelompok dalam jaringan. Semakin tinggi nilai "
+        f"betweenness, semakin besar kemungkinan aktor tersebut menjadi perantara dalam penyebaran "
+        f"informasi."
+    )
+
+    closeness_summary = (
+        f"Pada metrik closeness centrality, aktor dengan nilai tertinggi adalah {closeness_name} "
+        f"dengan nilai {closeness_value}. Hal ini menunjukkan bahwa aktor tersebut memiliki jarak "
+        f"yang relatif lebih dekat ke aktor-aktor lain dalam jaringan. Aktor dengan closeness tinggi "
+        f"berpotensi menjangkau pengguna lain secara lebih cepat."
+    )
+
+    eigenvector_summary = (
+        f"Pada metrik eigenvector centrality, aktor dengan nilai tertinggi adalah {eigenvector_name} "
+        f"dengan nilai {eigenvector_value}. Metrik ini menunjukkan bahwa aktor tersebut tidak hanya "
+        f"memiliki banyak koneksi, tetapi juga terhubung dengan aktor lain yang memiliki pengaruh "
+        f"tinggi. Dengan demikian, aktor ini dapat dipandang sebagai salah satu aktor paling berpengaruh "
+        f"dalam struktur jaringan."
+    )
+
+    if top_paths:
+        geodesic_summary = (
+            f"Analisis geodesic path menunjukkan bahwa rata-rata jarak sosial dalam jaringan adalah "
+            f"sekitar {average_distance} langkah, dengan rata-rata diameter jaringan sebesar "
+            f"{average_diameter}. Nilai ini menggambarkan seberapa jauh pengguna harus melewati "
+            f"aktor lain untuk dapat terhubung. Semakin kecil jarak geodesic, semakin cepat informasi "
+            f"dapat menyebar di dalam jaringan."
+        )
+    else:
+        geodesic_summary = (
+            "Analisis geodesic path belum menemukan sampel jalur yang cukup kuat antar aktor. "
+            "Hal ini dapat menunjukkan bahwa jaringan masih terfragmentasi atau sebagian besar "
+            "pengguna belum saling terhubung secara langsung maupun tidak langsung."
+        )
+
+    if total_cliques > 0:
+        clique_summary = (
+            f"Pada analisis clique, ditemukan {total_cliques} kelompok clique dalam jaringan. "
+            f"Clique terbesar memiliki {largest_clique_size} anggota. Hal ini menunjukkan adanya "
+            f"sub-kelompok pengguna yang saling terhubung secara langsung. Kelompok seperti ini "
+            f"dapat menjadi indikasi adanya komunitas kecil yang memiliki intensitas interaksi tinggi."
+        )
+    else:
+        clique_summary = (
+            "Pada analisis clique, belum ditemukan kelompok pengguna yang membentuk hubungan saling "
+            "terhubung secara penuh. Hal ini menunjukkan bahwa interaksi pengguna belum membentuk "
+            "sub-komunitas yang benar-benar rapat."
+        )
+
+    conclusion = (
+        f"Secara keseluruhan, jaringan sosial pada {source_label} menunjukkan bahwa aktor dengan "
+        f"koneksi langsung tinggi dapat diidentifikasi melalui degree centrality, aktor penghubung "
+        f"dapat dilihat melalui betweenness centrality, aktor yang paling mudah menjangkau jaringan "
+        f"dapat dilihat melalui closeness centrality, dan aktor berpengaruh dapat dilihat melalui "
+        f"eigenvector centrality. Hasil ini dapat digunakan untuk memahami pola interaksi, menemukan "
+        f"aktor kunci, serta melihat potensi terbentuknya komunitas dalam jaringan sosial."
+    )
+
+    return {
+        "overview": overview,
+        "degree_centrality": degree_summary,
+        "betweenness_centrality": betweenness_summary,
+        "closeness_centrality": closeness_summary,
+        "eigenvector_centrality": eigenvector_summary,
+        "geodesic_path": geodesic_summary,
+        "clique": clique_summary,
+        "conclusion": conclusion,
+        "key_findings": {
+            "most_connected_actor": {
+                "name": degree_name,
+                "metric": "degree_centrality",
+                "value": degree_value,
+            },
+            "main_bridge_actor": {
+                "name": betweenness_name,
+                "metric": "betweenness_centrality",
+                "value": betweenness_value,
+            },
+            "closest_actor": {
+                "name": closeness_name,
+                "metric": "closeness_centrality",
+                "value": closeness_value,
+            },
+            "most_influential_actor": {
+                "name": eigenvector_name,
+                "metric": "eigenvector_centrality",
+                "value": eigenvector_value,
+            },
+            "network_distance": {
+                "average_distance": average_distance,
+                "average_diameter": average_diameter,
+                "average_connected_users": average_connected_users,
+            },
+            "community_structure": {
+                "total_cliques": total_cliques,
+                "largest_clique_size": largest_clique_size,
+            },
+        },
+    }
+
+
+
+    try:
+        source = (source or "app").strip().lower()
+
+        if source not in ["app", "instagram"]:
+            raise HTTPException(
+                status_code=400,
+                detail="source harus bernilai 'app' atau 'instagram'."
+            )
+
+        metrics_response = get_network_metrics_summary(source)
+
+        if metrics_response.get("status") != "success":
+            return {
+                "status": "error",
+                "source_active": source,
+                "message": "Gagal membuat summary karena data metrik jaringan tidak berhasil diproses.",
+                "detail": metrics_response.get("message"),
+            }
+
+        narrative = _build_network_summary_narrative(
+            source=source,
+            metrics_response=metrics_response,
+        )
+
+        return {
+            "status": "success",
+            "source_active": source,
+            "data": {
+                "analysis_summary": narrative,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+
+        return {
+            "status": "error",
+            "source_active": source,
+            "message": str(e),
         }

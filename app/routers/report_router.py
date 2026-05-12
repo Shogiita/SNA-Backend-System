@@ -33,26 +33,16 @@ def get_dashboard_network_metrics(
 ):
     return network_analysis_controller.get_network_metrics_full_summary(source)
 
+@router.get("/dashboard/network-analysis-summary")
+def get_dashboard_network_analysis_summary(
+    source: str = Query("app", description="Pilih sumber data: 'app' atau 'instagram'"),
+):
+    return report_controller.get_network_analysis_summary(source)
+
 
 @router.get("/dashboard/live-analytics")
 def get_dashboard_live_analytics():
     return report_controller.get_live_analytics_summary()
-
-
-@router.get("/dashboard/monthly-report")
-def get_dashboard_monthly_report(
-    source: str = Query("app", description="Pilih sumber data: 'app' atau 'instagram'"),
-    year: int = Query(None, description="Tahun laporan, contoh: 2026"),
-    month: int = Query(None, description="Bulan laporan, 1-12"),
-    save_history: bool = Query(False, description="Simpan hasil report ke Firestore"),
-):
-    return network_analysis_controller.get_monthly_report(
-        source=source,
-        year=year,
-        month=month,
-        save_history=save_history,
-    )
-
 
 @router.get("/dashboard/monthly-report/history")
 def get_dashboard_monthly_report_history(
@@ -150,3 +140,14 @@ def get_network_export_image_data(
         max_edges=max_edges,
         limit=limit,
     )
+
+@router.get("/dashboard/google-analytics")
+def get_dashboard_google_analytics(
+    start_date: str = Query(None, description="Format: YYYY-MM-DD"),
+    end_date: str = Query(None, description="Format: YYYY-MM-DD"),
+):
+    return report_controller.get_google_analytics_summary(
+        start_date=start_date,
+        end_date=end_date,
+    )
+

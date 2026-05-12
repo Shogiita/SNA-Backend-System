@@ -1101,14 +1101,6 @@ def list_monthly_report_history(limit: int = 20):
             "message": str(error),
             "reports": [],
         }
-
-
-def get_monthly_report(
-    source: str = "app",
-    year: Optional[int] = None,
-    month: Optional[int] = None,
-    save_history: bool = False,
-):
     source = _normalize_source(source)
 
     now = datetime.now()
