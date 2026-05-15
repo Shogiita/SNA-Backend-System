@@ -16,9 +16,7 @@ from app.utils.sna_filter_utils import (
     is_ignored_instagram_user,
 )
 
-
 MENTION_REGEX = re.compile(r"@([A-Za-z0-9._]+)")
-
 
 def _safe_int(value, default: int, minimum: int, maximum: int) -> int:
     try:
@@ -27,7 +25,6 @@ def _safe_int(value, default: int, minimum: int, maximum: int) -> int:
         number = default
 
     return max(minimum, min(number, maximum))
-
 
 def _normalize_source(source: str) -> str:
     source = (source or "app").strip().lower()
@@ -39,7 +36,6 @@ def _normalize_source(source: str) -> str:
         )
 
     return source
-
 
 def _extract_mentions(text: str) -> List[str]:
     if not text:
@@ -56,7 +52,6 @@ def _extract_mentions(text: str) -> List[str]:
 
     return list(dict.fromkeys(cleaned_mentions))
 
-
 def _safe_section(section_name: str, callback: Callable[[], Any]):
     try:
         return callback()
@@ -68,10 +63,8 @@ def _safe_section(section_name: str, callback: Callable[[], Any]):
             "message": str(error),
         }
 
-
 def _normalize_node_key(value: str) -> str:
     return str(value or "").strip()
-
 
 def _possible_node_ids(raw_node: str) -> List[str]:
     node = _normalize_node_key(raw_node)
@@ -85,7 +78,6 @@ def _possible_node_ids(raw_node: str) -> List[str]:
         candidates.append(f"user_{node}")
 
     return list(dict.fromkeys(candidates))
-
 
 def _resolve_node_id(G: nx.Graph, raw_node: str) -> Optional[str]:
     candidates = _possible_node_ids(raw_node)
@@ -111,7 +103,6 @@ def _resolve_node_id(G: nx.Graph, raw_node: str) -> Optional[str]:
 
     return None
 
-
 def _node_to_response(G: nx.Graph, node_id: str) -> Dict:
     attrs = G.nodes[node_id]
 
@@ -125,7 +116,6 @@ def _node_to_response(G: nx.Graph, node_id: str) -> Dict:
         "source": attrs.get("source"),
         "community": attrs.get("community"),
     }
-
 
 def _edge_to_response(G: nx.Graph, source: str, target: str) -> Dict:
     data = G.get_edge_data(source, target, default={})
@@ -159,7 +149,6 @@ def _add_or_update_edge(
             relation=relation or "INTERACTION",
         )
 
-
 def _apply_communities_to_graph(G: nx.Graph) -> Dict[str, int]:
     if G.number_of_nodes() == 0:
         return {}
@@ -178,7 +167,6 @@ def _apply_communities_to_graph(G: nx.Graph) -> Dict[str, int]:
             G.nodes[node_id]["community"] = community_id
 
     return community_map
-
 
 def _build_app_user_graph(max_edges: int = 25000) -> nx.DiGraph:
     G = nx.DiGraph()
@@ -394,7 +382,6 @@ def _build_app_user_graph(max_edges: int = 25000) -> nx.DiGraph:
 
     return G
 
-
 def _build_instagram_user_graph(max_edges: int = 25000) -> nx.DiGraph:
     G = nx.DiGraph()
 
@@ -563,7 +550,6 @@ def _build_instagram_user_graph(max_edges: int = 25000) -> nx.DiGraph:
 
     return G
 
-
 def _build_user_graph(source: str, max_edges: int = 25000) -> nx.DiGraph:
     source = _normalize_source(source)
     max_edges = _safe_int(max_edges, default=25000, minimum=100, maximum=50000)
@@ -596,7 +582,6 @@ def _build_user_graph(source: str, max_edges: int = 25000) -> nx.DiGraph:
         )
 
     return G
-
 
 def list_available_nodes(
     source: str = "app",
@@ -644,7 +629,6 @@ def list_available_nodes(
         "nodes": result[:limit],
     }
 
-
 def get_node_neighbors(
     source: str = "app",
     node: str = "",
@@ -691,7 +675,6 @@ def get_node_neighbors(
         "neighbors": neighbors[:limit],
     }
 
-
 def get_mention_edges(
     source: str = "instagram",
     max_edges: int = 25000,
@@ -725,7 +708,6 @@ def get_mention_edges(
         "total_mentions": len(mention_edges),
         "mentions": mention_edges[:limit],
     }
-
 
 def get_shortest_path(
     source: str = "app",
@@ -963,7 +945,6 @@ def _community_summary(G: nx.Graph, limit: int = 10):
         "top_communities": communities[:limit],
     }
 
-
 def get_edge_weight_schema():
     return {
         "status": "success",
@@ -973,7 +954,6 @@ def get_edge_weight_schema():
             "Mention dideteksi dari teks komentar/reply yang mengandung @username."
         ),
     }
-
 
 def _get_graph_analysis_summary(source: str = "app"):
     G_directed = _build_user_graph(source=source, max_edges=25000)
@@ -1007,7 +987,6 @@ def _get_graph_analysis_summary(source: str = "app"):
         },
         "clique_summary": clique_summary,
     }
-
 
 def get_network_metrics_full_summary(source: str = "app"):
     source = _normalize_source(source)
@@ -1055,7 +1034,6 @@ def get_network_metrics_full_summary(source: str = "app"):
             "weight_schema": EDGE_WEIGHT_SCHEMA,
         },
     }
-
 
 def get_graph_png_data(
     source: str = "app",
@@ -1107,7 +1085,6 @@ def get_graph_png_data(
         },
     }
 
-
 def save_monthly_report_history(report_data: Dict):
     try:
         period = report_data.get("period", {})
@@ -1136,7 +1113,6 @@ def save_monthly_report_history(report_data: Dict):
             "status": "error",
             "message": str(error),
         }
-
 
 def list_monthly_report_history(limit: int = 20):
     limit = _safe_int(limit, default=20, minimum=1, maximum=100)

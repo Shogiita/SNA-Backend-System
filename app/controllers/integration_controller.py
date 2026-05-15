@@ -691,7 +691,6 @@ def _safe_get_nested(data: dict, keys: list, default=0):
     except Exception:
         return default
 
-
 def _normalize_export_value(value):
     if value is None:
         return ""
@@ -700,7 +699,6 @@ def _normalize_export_value(value):
         return str(value)
 
     return value
-
 
 def _get_export_summary_rows(payload) -> list[list]:
     """
@@ -758,7 +756,6 @@ def _get_export_summary_rows(payload) -> list[list]:
         [_normalize_export_value(cell) for cell in row]
         for row in rows
     ]
-
 
 def _build_csv_with_summary(summary_rows: list[list], df: pd.DataFrame) -> str:
     """
@@ -994,14 +991,6 @@ def _format_export_date(value):
 
     return str(value)
 
-def _safe_value(value, default="-"):
-    if value is None:
-        return default
-    if value == "":
-        return default
-    return value
-
-
 def _first_worksheet(spreadsheet):
     worksheet = spreadsheet.get_worksheet(0)
 
@@ -1013,14 +1002,6 @@ def _first_worksheet(spreadsheet):
         )
 
     return worksheet
-
-
-def _format_export_date(value):
-    if not value:
-        return "-"
-
-    return str(value)
-
 
 def _get_app_summary_rows():
     summary = {
@@ -1421,7 +1402,6 @@ def _normalize_firestore_datetime(value):
 
     return str(value)
 
-
 def _history_sort_key(item: Dict[str, Any]):
     raw_value = item.get("updated_at") or item.get("created_at") or ""
 
@@ -1437,7 +1417,6 @@ def _history_sort_key(item: Dict[str, Any]):
         return parsed.timestamp()
     except Exception:
         return 0
-
 
 def get_exported_sheets_history(current_admin: Optional[Dict[str, Any]] = None):
     try:
@@ -1531,138 +1510,6 @@ def get_exported_sheets_history(current_admin: Optional[Dict[str, Any]] = None):
             detail=f"Gagal memuat riwayat export Google Sheets: {str(e)}",
         )
            
-def link_existing_sheet(payload: Dict[str, Any], current_admin: Optional[Dict[str, Any]] = None):
-    """
-    Menghubungkan data export SNA ke Google Spreadsheet yang sudah dibuat user.
-
-    Frontend mengirim payload:
-    {
-        "source": "app" | "instagram",
-        "existing_sheet_url": "https://docs.google.com/spreadsheets/d/...",
-        "export_all": true,
-        "selected_columns": [],
-        "start_date": "YYYY-MM-DD",
-        "end_date": "YYYY-MM-DD"
-    }
-    """
-
-    try:
-        source_type = payload.get("source", "app")
-        existing_sheet_url = payload.get("existing_sheet_url")
-        export_all = bool(payload.get("export_all", True))
-        selected_columns = payload.get("selected_columns", [])
-        start_date = payload.get("start_date")
-        end_date = payload.get("end_date")
-
-        if source_type not in ["app", "instagram"]:
-            raise HTTPException(
-                status_code=400,
-                detail="source harus bernilai 'app' atau 'instagram'.",
-            )
-
-        if not existing_sheet_url:
-            raise HTTPException(
-                status_code=400,
-                detail="URL Google Spreadsheet wajib diisi.",
-            )
-
-        df = get_master_dataframe(
-            source_type=source_type,
-            start_date=start_date,
-            end_date=end_date,
-            selected_columns=selected_columns,
-            export_all=export_all,
-        )
-
-        if df is None or df.empty:
-            raise HTTPException(
-                status_code=404,
-                detail="Tidak ada data untuk diexport pada filter yang dipilih.",
-            )
-
-        gc = get_gspread_client()
-
-        try:
-            sh = gc.open_by_url(existing_sheet_url)
-        except Exception:
-            service_account_email = GOOGLE_CREDENTIALS.get(
-                "client_email",
-                "Email Service Account tidak ditemukan",
-            )
-
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Akses Google Spreadsheet ditolak. Pastikan Spreadsheet sudah "
-                    f"diberi akses Editor ke service account: {service_account_email}"
-                ),
-            )
-
-        worksheet_title = "DATA_APP" if source_type == "app" else "DATA_IG"
-
-        try:
-            worksheet = sh.worksheet(worksheet_title)
-            worksheet.clear()
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet = sh.add_worksheet(
-                title=worksheet_title,
-                rows=max(len(df) + 10, 100),
-                cols=max(len(df.columns) + 5, 20),
-            )
-
-        safe_df = df.fillna("").astype(str)
-        values = [safe_df.columns.tolist()] + safe_df.values.tolist()
-
-        worksheet.update(values, "A1")
-
-        admin_email = current_admin.get("email") if current_admin else None
-        admin_uid = current_admin.get("uid") if current_admin else None
-
-        doc_data = {
-            "sheet_id": sh.id,
-            "sheet_url": sh.url,
-            "sheet_name": f"{sh.title} ({source_type.upper()})",
-            "worksheet": worksheet_title,
-            "source_type": source_type,
-            "rows_count": len(df),
-            "columns": df.columns.tolist(),
-            "created_by_uid": admin_uid,
-            "created_by_email": admin_email,
-            "storage_owner": "existing_user_sheet",
-            "created_at": datetime.datetime.now().isoformat(),
-            "updated_at": datetime.datetime.now().isoformat(),
-        }
-
-        try:
-            _, doc_ref = db.collection("linked_sheets").add(doc_data)
-            doc_id = doc_ref.id
-        except Exception:
-            doc_id = None
-
-        return {
-            "status": "success",
-            "message": "Data berhasil ditautkan ke Google Spreadsheet.",
-            "spreadsheet_url": sh.url,
-            "worksheet": worksheet_title,
-            "source": source_type,
-            "rows_count": len(df),
-            "columns": df.columns.tolist(),
-            "data": {
-                "id": doc_id,
-                "sheet_url": sh.url,
-                "sheet_name": sh.title,
-                "worksheet": worksheet_title,
-            },
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Gagal menautkan data ke Google Spreadsheet: {str(e)}",
-        )
-
 def get_linked_sheets(current_admin=None):
     try:
         current_uid = current_admin.get("uid") if current_admin else None
@@ -1749,134 +1596,7 @@ def unlink_sheet(doc_id: str, current_admin=None):
             status_code=500,
             detail=f"Gagal menghapus riwayat Spreadsheet: {str(e)}",
         )
-async def export_to_csv(
-    source_type: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    selected_columns: Optional[List[str]] = None,
-    export_all: bool = True,
-):
-    try:
-        df = await asyncio.to_thread(
-            get_master_dataframe,
-            source_type,
-            start_date,
-            end_date,
-            selected_columns,
-            export_all,
-        )
 
-        if df is None or df.empty:
-            raise HTTPException(status_code=404, detail="Tidak ada data ditemukan.")
-
-        fd, temp_path = tempfile.mkstemp(suffix=".csv")
-        os.close(fd)
-
-        await asyncio.to_thread(
-            df.to_csv,
-            temp_path,
-            index=False,
-            encoding="utf-8-sig",
-        )
-
-        return FileResponse(
-            path=temp_path,
-            filename=f"SNA_Dataset_{source_type.upper()}.csv",
-            media_type="text/csv",
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-async def link_to_sheets(
-    existing_sheet_url: str,
-    source_type: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    selected_columns: Optional[List[str]] = None,
-    export_all: bool = True,
-):
-    if not existing_sheet_url:
-        raise HTTPException(status_code=400, detail="URL Spreadsheet wajib diisi.")
-
-    if source_type not in ["app", "instagram"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Pilihan sumber data hanya 'app' atau 'instagram'",
-        )
-
-    try:
-        df = await asyncio.to_thread(
-            get_master_dataframe,
-            source_type,
-            start_date,
-            end_date,
-            selected_columns,
-            export_all,
-        )
-
-        if df.empty:
-            raise ValueError("Tidak ada data untuk diekspor pada rentang waktu tersebut.")
-
-        def _gspread_operations():
-            gc = get_gspread_client()
-            try:
-                sh = gc.open_by_url(existing_sheet_url)
-            except Exception:
-                service_account_email = GOOGLE_CREDENTIALS.get(
-                    "client_email",
-                    "Email Service Account tidak ditemukan",
-                )
-                raise ValueError(
-                    "Akses Ditolak! Pastikan Anda sudah memberikan akses "
-                    f"'Editor' pada Spreadsheet Anda ke email: {service_account_email}"
-                )
-
-            tab_name = "DATA_APP" if source_type == "app" else "DATA_IG"
-
-            try:
-                worksheet = sh.worksheet(tab_name)
-            except gspread.exceptions.WorksheetNotFound:
-                worksheet = sh.add_worksheet(title=tab_name, rows=1, cols=1)
-
-            worksheet.clear()
-            safe_df = df.fillna("").astype(str)
-            worksheet.update([safe_df.columns.tolist()] + safe_df.values.tolist())
-
-            return sh.id, sh.url, sh.title
-
-        sh_id, sh_url, sheet_name = await asyncio.to_thread(_gspread_operations)
-
-        doc_data = {
-            "sheet_id": sh_id,
-            "sheet_url": sh_url,
-            "sheet_name": f"{sheet_name} ({source_type.upper()})",
-            "source_type": source_type,
-            "created_at": datetime.datetime.now().isoformat(),
-        }
-
-        _, doc_ref = db.collection("linked_sheets").add(doc_data)
-
-        return {
-            "status": "success",
-            "message": "Data berhasil ditautkan ke Spreadsheet Anda.",
-            "data": {
-                "id": doc_ref.id,
-                "sheet_url": sh_url,
-            },
-        }
-
-    except ValueError as ve:
-        raise HTTPException(status_code=403, detail=str(ve))
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-async def get_all_linked_sheets():
     try:
         docs = db.collection("linked_sheets").order_by(
             "created_at",
@@ -1891,8 +1611,6 @@ async def get_all_linked_sheets():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-async def unlink_sheets(doc_id: str):
     try:
         db.collection("linked_sheets").document(doc_id).delete()
 

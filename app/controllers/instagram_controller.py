@@ -21,7 +21,6 @@ async def _check_config() -> None:
             detail="IG_ACCESS_TOKEN belum di-generate atau belum diatur di server."
         )
 
-
 async def _make_ig_api_request(
     endpoint: str,
     params: Optional[Dict[str, Any]] = None,
@@ -68,7 +67,6 @@ async def _make_ig_api_request(
             detail=f"Terjadi kesalahan internal: {str(error)}"
         )
 
-
 async def get_user_profile() -> Dict[str, Any]:
     endpoint = f"{config.IG_BUSINESS_ACCOUNT_ID}"
     params = {
@@ -79,43 +77,6 @@ async def get_user_profile() -> Dict[str, Any]:
     }
 
     return await _make_ig_api_request(endpoint, params)
-
-
-async def get_user_media(limit: int = 10) -> Dict[str, Any]:
-    safe_limit = max(1, min(int(limit), 100))
-
-    endpoint = f"{config.IG_BUSINESS_ACCOUNT_ID}/media"
-    params = {
-        "limit": safe_limit,
-        "fields": (
-            "id,caption,media_type,media_product_type,media_url,"
-            "permalink,thumbnail_url,timestamp,like_count,comments_count"
-        )
-    }
-
-    return await _make_ig_api_request(endpoint, params)
-
-
-async def get_media_comments(media_id: str, limit: int = 50) -> Dict[str, Any]:
-    if not media_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="media_id wajib diisi."
-        )
-
-    safe_limit = max(1, min(int(limit), 100))
-
-    endpoint = f"{media_id}/comments"
-    params = {
-        "limit": safe_limit,
-        "fields": (
-            "id,text,timestamp,username,like_count,"
-            "replies{id,text,timestamp,username,like_count}"
-        )
-    }
-
-    return await _make_ig_api_request(endpoint, params)
-
 
 # async def debug_token() -> Dict[str, Any]:
 #     token = config.IG_ACCESS_TOKEN

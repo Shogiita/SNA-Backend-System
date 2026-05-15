@@ -30,11 +30,6 @@ from google.analytics.data_v1beta.types import (
 from google.oauth2 import service_account
 from app import config
 from app.utils.sna_filter_utils import is_ignored_app_user, is_ignored_instagram_user, normalize_hashtag, is_ignored_hashtag
-from google.analytics.data_v1beta.types import (
-    FilterExpression,
-    Filter,
-)
-
 
 def _safe_percentage(current_value: int, previous_value: int) -> float:
     """
@@ -119,159 +114,6 @@ def _run_ga_report(
     credentials = get_ga_credentials()
     client = BetaAnalyticsDataClient(credentials=credentials)
 
-    request_data = {
-        "property": f"properties/{property_id}",
-        "date_ranges": [
-            DateRange(
-                start_date=start_date,
-                end_date=end_date,
-            )
-        ],
-        "metrics": [
-            Metric(name=metric_name)
-            for metric_name in metrics
-        ],
-        "limit": limit,
-    }
-
-    if dimensions:
-        request_data["dimensions"] = [
-            Dimension(name=dimension_name)
-            for dimension_name in dimensions
-        ]
-
-    if order_by_metric:
-        request_data["order_bys"] = [
-            OrderBy(
-                metric=OrderBy.MetricOrderBy(
-                    metric_name=order_by_metric,
-                ),
-                desc=True,
-            )
-        ]
-
-    response = client.run_report(
-        RunReportRequest(**request_data)
-    )
-
-    rows = []
-
-    for row in response.rows:
-        item = {}
-
-        for index, dimension_name in enumerate(dimensions):
-            value = row.dimension_values[index].value
-
-            if dimension_name == "date":
-                value = _format_ga_date(value)
-
-            item[dimension_name] = value
-
-        for index, metric_name in enumerate(metrics):
-            value = row.metric_values[index].value
-            item[metric_name] = _parse_ga_metric_value(value)
-
-        rows.append(item)
-
-    return rows
-def _format_ga_date(value: str) -> str:
-    try:
-        if not value or len(value) != 8:
-            return value
-
-        return f"{value[0:4]}-{value[4:6]}-{value[6:8]}"
-    except Exception:
-        return value
-
-
-def _run_ga_report(
-    dimensions: list[str],
-    metrics: list[str],
-    start_date: str,
-    end_date: str,
-    limit: int = 10,
-    order_by_metric: str | None = None,
-):
-    property_id = os.getenv("GA_PROPERTY_ID")
-
-    if not property_id:
-        raise ValueError("GA_PROPERTY_ID tidak ditemukan di environment variables.")
-
-    credentials = get_ga_credentials()
-    client = BetaAnalyticsDataClient(credentials=credentials)
-
-    request_data = {
-        "property": f"properties/{property_id}",
-        "date_ranges": [
-            DateRange(
-                start_date=start_date,
-                end_date=end_date,
-            )
-        ],
-        "metrics": [
-            Metric(name=metric_name)
-            for metric_name in metrics
-        ],
-        "limit": limit,
-    }
-
-    if dimensions:
-        request_data["dimensions"] = [
-            Dimension(name=dimension_name)
-            for dimension_name in dimensions
-        ]
-
-    if order_by_metric:
-        request_data["order_bys"] = [
-            OrderBy(
-                metric=OrderBy.MetricOrderBy(
-                    metric_name=order_by_metric,
-                ),
-                desc=True,
-            )
-        ]
-
-    response = client.run_report(
-        RunReportRequest(**request_data)
-    )
-
-    rows = []
-
-    for row in response.rows:
-        item = {}
-
-        for index, dimension_name in enumerate(dimensions):
-            value = row.dimension_values[index].value
-
-            if dimension_name == "date":
-                value = _format_ga_date(value)
-
-            item[dimension_name] = value
-
-        for index, metric_name in enumerate(metrics):
-            value = row.metric_values[index].value
-            item[metric_name] = _parse_ga_metric_value(value)
-
-        rows.append(item)
-
-    return rows
-
-def _run_ga_report(
-    dimensions: list[str],
-    metrics: list[str],
-    start_date: str,
-    end_date: str,
-    limit: int = 10,
-    order_by_metric: str | None = None,
-):
-    property_id = os.getenv("GA_PROPERTY_ID")
-
-    if not property_id:
-        raise ValueError("GA_PROPERTY_ID tidak ditemukan di environment variables.")
-
-    credentials = get_ga_credentials()
-    client = BetaAnalyticsDataClient(credentials=credentials)
-
     request_kwargs = {
         "property": f"properties/{property_id}",
         "date_ranges": [
@@ -322,16 +164,10 @@ def _run_ga_report(
 
     return rows
 
-def get_first_day_of_last_month(dt):
-    first_day_of_current_month = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    last_day_of_last_month = first_day_of_current_month - timedelta(days=1)
-    return last_day_of_last_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
 def get_top_content_summary(source: str = "app", start_date: str = None, end_date: str = None):
     try:
         now = datetime.now()
 
-        # 1. LOGIKA FILTER TANGGAL
         if start_date:
             start_dt = parser.parse(start_date).replace(
                 hour=0,
@@ -365,7 +201,6 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
                 microsecond=0
             )
 
-        # 2. FORMATTING TANGGAL UNTUK DATABASE
         ig_iso_start = start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
         ig_iso_end = end_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
 
@@ -374,7 +209,6 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
         epoch_start = int(start_dt.timestamp() * 1000)
         epoch_end = int(end_dt.timestamp() * 1000)
 
-        # 3. QUERY CYPHER BERDASARKAN SUMBER DATA
         if source == "instagram":
             top_query = """
             MATCH (i:InstagramPost)
@@ -454,7 +288,6 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
             LIMIT 5000
             """
 
-        # 4. EKSEKUSI QUERY
         with neo4j_driver.session() as session:
             if source == "instagram":
                 top_content = session.run(
@@ -484,7 +317,6 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
                     epoch_end=epoch_end
                 ).data()
 
-        # 5. PEMROSESAN HASHTAG MENGGUNAKAN sna_filter_utils
         hashtag_pattern = re.compile(r"#(\w+)")
         hashtag_counts = Counter()
         hashtag_posts_map = {}
@@ -573,7 +405,6 @@ def get_top_content_summary(source: str = "app", start_date: str = None, end_dat
         }
 
     except Exception as e:
-        # traceback.print_exc()
         return {
             "status": "error",
             "message": str(e)
@@ -734,7 +565,6 @@ def get_network_metrics_summary(source: str = "app"):
         ]
 
         if user_nodes:
-            # 1. Kalkulasi Global Metrics dari 1-Mode Projection
             G_user = bipartite.projected_graph(G, user_nodes)
             components = sorted(
                 nx.connected_components(G_user),
@@ -769,7 +599,6 @@ def get_network_metrics_summary(source: str = "app"):
                     "average_of_connected_users": round(total_reach_count / len(user_nodes), 2)
                 }
 
-            # 2. Kalkulasi Cliques
             all_cliques = []
 
             if len(G_user.nodes()) < 500:
@@ -801,7 +630,6 @@ def get_network_metrics_summary(source: str = "app"):
                     for index, clique in enumerate(all_cliques[:10])
                 ]
 
-            # 3. Persiapan Weight & Distance untuk Centrality
             for _, _, data in G.edges(data=True):
                 weight = data.get("weight", 1)
 
@@ -816,7 +644,6 @@ def get_network_metrics_summary(source: str = "app"):
                 data["weight"] = weight
                 data["distance"] = 1.0 / weight
 
-            # 4. Kalkulasi 4 Metrik Centrality
             degree_centrality = nx.degree_centrality(G)
 
             betweenness_centrality = nx.betweenness_centrality(
@@ -931,7 +758,6 @@ def get_network_metrics_summary(source: str = "app"):
                 if _is_valid_user_node(node)
             ][:10]
 
-            # 5. Shortest Paths Sample
             if components and len(components[0]) > 2:
                 component = [
                     node
@@ -963,7 +789,6 @@ def get_network_metrics_summary(source: str = "app"):
                     except nx.NetworkXNoPath:
                         pass
 
-            # 6. Analisis Deskriptif
             avg_degree = global_metrics.get("average_of_average_degrees", 0)
 
             if avg_degree == 0:
@@ -1280,160 +1105,6 @@ def get_google_analytics_summary(
     except Exception as e:
         traceback.print_exc()
 
-        return {
-            "status": "error",
-            "message": str(e),
-        }
-
-def get_google_analytics_report_summary(
-    start_date: str | None = None,
-    end_date: str | None = None,
-):
-    try:
-        now = datetime.now()
-
-        if not start_date:
-            start_date = now.replace(day=1).strftime("%Y-%m-%d")
-
-        if not end_date:
-            end_date = now.strftime("%Y-%m-%d")
-
-        overview_rows = _run_ga_report(
-            dimensions=[],
-            metrics=[
-                "activeUsers",
-                "newUsers",
-                "totalUsers",
-                "sessions",
-                "engagedSessions",
-                "screenPageViews",
-                "eventCount",
-                "averageSessionDuration",
-            ],
-            start_date=start_date,
-            end_date=end_date,
-            limit=1,
-        )
-
-        users_by_date = _run_ga_report(
-            dimensions=["date"],
-            metrics=[
-                "activeUsers",
-                "newUsers",
-                "sessions",
-            ],
-            start_date=start_date,
-            end_date=end_date,
-            limit=100,
-            order_by_metric="activeUsers",
-        )
-
-        users_by_platform = _run_ga_report(
-            dimensions=["platform"],
-            metrics=[
-                "activeUsers",
-                "newUsers",
-            ],
-            start_date=start_date,
-            end_date=end_date,
-            limit=10,
-            order_by_metric="activeUsers",
-        )
-
-        users_by_country = _run_ga_report(
-            dimensions=["country"],
-            metrics=["activeUsers"],
-            start_date=start_date,
-            end_date=end_date,
-            limit=10,
-            order_by_metric="activeUsers",
-        )
-
-        users_by_city = _run_ga_report(
-            dimensions=["city"],
-            metrics=["activeUsers"],
-            start_date=start_date,
-            end_date=end_date,
-            limit=10,
-            order_by_metric="activeUsers",
-        )
-
-        users_by_language = _run_ga_report(
-            dimensions=["language"],
-            metrics=["activeUsers"],
-            start_date=start_date,
-            end_date=end_date,
-            limit=10,
-            order_by_metric="activeUsers",
-        )
-
-        users_by_channel = _run_ga_report(
-            dimensions=["firstUserPrimaryChannelGroup"],
-            metrics=["newUsers"],
-            start_date=start_date,
-            end_date=end_date,
-            limit=10,
-            order_by_metric="newUsers",
-        )
-
-        sessions_by_channel = _run_ga_report(
-            dimensions=["sessionDefaultChannelGroup"],
-            metrics=["sessions"],
-            start_date=start_date,
-            end_date=end_date,
-            limit=10,
-            order_by_metric="sessions",
-        )
-
-        top_events = _run_ga_report(
-            dimensions=["eventName"],
-            metrics=["eventCount"],
-            start_date=start_date,
-            end_date=end_date,
-            limit=10,
-            order_by_metric="eventCount",
-        )
-
-        top_screens = _run_ga_report(
-            dimensions=["unifiedScreenName"],
-            metrics=["screenPageViews"],
-            start_date=start_date,
-            end_date=end_date,
-            limit=10,
-            order_by_metric="screenPageViews",
-        )
-
-        return {
-            "status": "success",
-            "date_range": {
-                "start_date": start_date,
-                "end_date": end_date,
-            },
-            "data": {
-                "overview": overview_rows[0] if overview_rows else {
-                    "activeUsers": 0,
-                    "newUsers": 0,
-                    "totalUsers": 0,
-                    "sessions": 0,
-                    "engagedSessions": 0,
-                    "screenPageViews": 0,
-                    "eventCount": 0,
-                    "averageSessionDuration": 0,
-                },
-                "users_by_date": users_by_date,
-                "users_by_platform": users_by_platform,
-                "users_by_country": users_by_country,
-                "users_by_city": users_by_city,
-                "users_by_language": users_by_language,
-                "users_by_channel": users_by_channel,
-                "sessions_by_channel": sessions_by_channel,
-                "top_events": top_events,
-                "top_screens": top_screens,
-            },
-        }
-
-    except Exception as e:
-        traceback.print_exc()
         return {
             "status": "error",
             "message": str(e),
@@ -1784,7 +1455,6 @@ def get_stats_summary():
                 f"{new_users_last_month} user baru bulan lalu"
             ),
 
-            # legacy key agar frontend lama tetap aman
             "total_post": total_app_posts,
             "total_post_kawanss": total_kawanss_posts,
         }
@@ -1797,7 +1467,6 @@ def get_stats_summary():
             "new_30_days_infoss": new_30_days_infoss,
             "new_30_days_kawan_ss": new_30_days_kawanss,
 
-            # info tambahan, bukan source utama total post dashboard
             "instagram_total": total_instagram_posts,
             "instagram_new_30_days": new_30_days_instagram_posts,
         }
@@ -2306,7 +1975,6 @@ def get_stats_summary():
     try:
         now = datetime.now()
 
-        # Bulan ini
         this_month_start = now.replace(
             day=1,
             hour=0,
@@ -2315,7 +1983,6 @@ def get_stats_summary():
             microsecond=0
         )
 
-        # Bulan lalu
         last_month_end = this_month_start - timedelta(seconds=1)
         last_month_start = last_month_end.replace(
             day=1,
@@ -2325,10 +1992,8 @@ def get_stats_summary():
             microsecond=0
         )
 
-        # 30 hari terakhir
         last_30_days_start = now - timedelta(days=30)
 
-        # Format epoch millisecond untuk data Firebase yang pakai createdAt angka
         this_month_start_epoch = int(this_month_start.timestamp() * 1000)
         now_epoch = int(now.timestamp() * 1000)
 
@@ -2337,7 +2002,6 @@ def get_stats_summary():
 
         last_30_days_epoch = int(last_30_days_start.timestamp() * 1000)
 
-        # Format ISO string untuk data yang pakai uploadDate / createdAt string
         this_month_start_iso = this_month_start.isoformat()
         now_iso = now.isoformat()
 
@@ -2346,7 +2010,6 @@ def get_stats_summary():
 
         last_30_days_iso = last_30_days_start.isoformat()
 
-        # Format Instagram timestamp: 2026-04-29T14:58:55+0000
         this_month_start_ig = this_month_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
         now_ig = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
 
@@ -2755,9 +2418,6 @@ def _get_actor_name(item):
         or "-"
     )
 
-import traceback
-from fastapi import HTTPException
-
 def _build_network_summary_narrative(source: str, metrics_response: dict):
     data = metrics_response.get("data", {})
 
@@ -2793,7 +2453,6 @@ def _build_network_summary_narrative(source: str, metrics_response: dict):
 
     source_label = "Instagram" if source == "instagram" else "Aplikasi Suara Surabaya"
 
-    # --- KONDISI DATA KOSONG / SEPI ---
     if not degree_top and not betweenness_top and not closeness_top and not eigenvector_top:
         return {
             "overview": f"Aktivitas di {source_label} masih terlalu sepi untuk dianalisis.",
@@ -2806,7 +2465,6 @@ def _build_network_summary_narrative(source: str, metrics_response: dict):
             "conclusion": "Kesimpulan: Jaringan belum memiliki pola yang jelas karena minimnya interaksi.",
         }
 
-    # --- KONDISI DATA TERSEDIA (SINGKAT & JELAS) ---
     overview = f"Ringkasan pola interaksi pengguna di {source_label}:"
 
     degree_summary = (

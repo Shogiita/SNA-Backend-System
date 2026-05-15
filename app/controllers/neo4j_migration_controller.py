@@ -7,7 +7,6 @@ from fastapi import BackgroundTasks, HTTPException
 
 from app.database import db, neo4j_driver
 
-
 MIGRATION_META_COLLECTION = "_migration_meta"
 MIGRATION_META_DOCUMENT = "firebase_to_neo4j"
 
@@ -52,7 +51,6 @@ def start_migration(background_tasks: BackgroundTasks) -> bool:
 
     return True
 
-
 def get_migration_status():
     status = _get_status_doc()
 
@@ -74,7 +72,6 @@ def get_migration_status():
 
     return status
 
-
 def unlock_migration():
     _update_status_doc({
         "is_running": False,
@@ -90,7 +87,6 @@ def unlock_migration():
         "status": "success",
         "message": "Migration lock berhasil dibuka. Sekarang Anda bisa hit POST /neo4j/migrate lagi."
     }
-
 
 async def run_migration_background():
     if _migration_lock.locked():
@@ -128,30 +124,6 @@ async def run_migration_background():
                 "heartbeat_at": _now_iso(),
                 "last_error": str(e),
             })
-
-
-async def delete_all_neo4j_data():
-    try:
-        with neo4j_driver.session() as session:
-            session.run("MATCH (n) DETACH DELETE n")
-
-        try:
-            db.collection(MIGRATION_META_COLLECTION).document(MIGRATION_META_DOCUMENT).delete()
-        except Exception:
-            pass
-
-        print("[NEO4J] Semua data berhasil dihapus.")
-
-        return {
-            "status": "success",
-            "message": "Semua data Neo4j berhasil dihapus dan metadata migration berhasil direset."
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Gagal menghapus data Neo4j: {str(e)}"
-        )
 
 def _run_full_migration_sync():
     start_time = datetime.now(timezone.utc)
@@ -301,7 +273,6 @@ def _migrate_users() -> int:
         _update_progress_error(progress_key, e)
         return total_saved
 
-
 def _normalize_user(data: dict[str, Any]) -> dict[str, Any]:
     user_id = str(data.get("id", ""))
 
@@ -327,7 +298,6 @@ def _normalize_user(data: dict[str, Any]) -> dict[str, Any]:
         "createdAt": _safe_datetime_value(data.get("createdAt")),
         "updatedAt": _safe_datetime_value(data.get("updatedAt")),
     }
-
 
 def _upsert_users(users: list[dict[str, Any]]):
     query = """
@@ -401,7 +371,6 @@ def _migrate_posts(collection_name: str, neo4j_label: str, progress_key: str) ->
         _update_progress_error(progress_key, e)
         return total_saved
 
-
 def _normalize_post(data: dict[str, Any]) -> dict[str, Any]:
     post_id = str(data.get("id", ""))
 
@@ -457,7 +426,6 @@ def _normalize_post(data: dict[str, Any]) -> dict[str, Any]:
         "isDeleted": _safe_bool(data.get("isDeleted"), False),
     }
 
-
 def _upsert_posts(posts: list[dict[str, Any]], neo4j_label: str):
     allowed_labels = {"FirebaseKawanSS", "FirebaseInfoss"}
 
@@ -490,7 +458,6 @@ def _upsert_posts(posts: list[dict[str, Any]], neo4j_label: str):
 
     with neo4j_driver.session() as session:
         session.run(query, posts=posts)
-
 
 def _migrate_comments() -> int:
     collection_name = "comments"
@@ -549,7 +516,6 @@ def _migrate_comments() -> int:
         _update_progress_error(progress_key, e)
         return total_saved
 
-
 def _normalize_comment(data: dict[str, Any]) -> dict[str, Any]:
     text = _first_not_empty(
         data,
@@ -580,7 +546,6 @@ def _normalize_comment(data: dict[str, Any]) -> dict[str, Any]:
         "updatedAt": _safe_datetime_value(_first_not_empty(data, ["updatedAt", "updated_at"], "")),
         "isDeleted": _safe_bool(data.get("isDeleted"), False),
     }
-
 
 def _upsert_comments(comments: list[dict[str, Any]]):
     query = """
@@ -622,7 +587,6 @@ def _upsert_comments(comments: list[dict[str, Any]]):
     with neo4j_driver.session() as session:
         session.run(query, comments=comments)
 
-
 def _empty_progress(collection_name: str) -> dict[str, Any]:
     return {
         "collection": collection_name,
@@ -633,7 +597,6 @@ def _empty_progress(collection_name: str) -> dict[str, Any]:
         "last_error": None,
         "done": False,
     }
-
 
 def _update_progress_seen(
     key: str,
@@ -652,7 +615,6 @@ def _update_progress_seen(
         "heartbeat_at": _now_iso(),
     })
 
-
 def _update_progress_done(
     key: str,
     total_read: int,
@@ -670,14 +632,12 @@ def _update_progress_done(
         "heartbeat_at": _now_iso(),
     })
 
-
 def _update_progress_error(key: str, error: Exception):
     _update_status_doc({
         f"processed.{key}.last_error": str(error),
         "updated_at": _now_iso(),
         "heartbeat_at": _now_iso(),
     })
-
 
 def _get_status_doc() -> dict[str, Any]:
     try:
@@ -692,21 +652,17 @@ def _get_status_doc() -> dict[str, Any]:
         print(f"[MIGRATION STATUS] Failed to get status doc: {e}")
         return {}
 
-
 def _set_status_doc(data: dict[str, Any]):
     db.collection(MIGRATION_META_COLLECTION).document(MIGRATION_META_DOCUMENT).set(data)
 
-
 def _update_status_doc(data: dict[str, Any]):
     db.collection(MIGRATION_META_COLLECTION).document(MIGRATION_META_DOCUMENT).set(data, merge=True)
-
 
 def _is_migration_running_and_not_stale(status: dict[str, Any]) -> bool:
     if status.get("is_running") is not True:
         return False
 
     return not _is_status_stale(status)
-
 
 def _is_status_stale(status: dict[str, Any]) -> bool:
     heartbeat_at = status.get("heartbeat_at") or status.get("updated_at")
@@ -737,7 +693,6 @@ def _sanitize_status_data(data: dict[str, Any]) -> dict[str, Any]:
 
     return sanitized
 
-
 def _first_not_empty(data: dict[str, Any], keys: list[str], default: Any = "") -> Any:
     for key in keys:
         value = data.get(key)
@@ -746,7 +701,6 @@ def _first_not_empty(data: dict[str, Any], keys: list[str], default: Any = "") -
             return value
 
     return default
-
 
 def _safe_datetime_value(value: Any) -> str:
     if value is None:
@@ -760,7 +714,6 @@ def _safe_datetime_value(value: Any) -> str:
 
     return str(value)
 
-
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         if value is None or value == "":
@@ -770,7 +723,6 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
     except Exception:
         return default
-
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
     if value is None or value == "":
@@ -783,7 +735,6 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
         return value.lower() in ["true", "1", "yes", "y"]
 
     return bool(value)
-
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
