@@ -137,7 +137,6 @@ def _edge_to_response(G: nx.Graph, source: str, target: str) -> Dict:
         "relation": data.get("relation", "INTERACTION"),
     }
 
-
 def _add_or_update_edge(
     G: nx.DiGraph,
     source_node: str,
@@ -735,6 +734,7 @@ def get_shortest_path(
     max_edges: int = 25000,
 ):
     source = _normalize_source(source)
+    max_edges = _safe_int(max_edges, default=25000, minimum=100, maximum=50000)
 
     if not source_node or not target_node:
         raise HTTPException(
@@ -742,6 +742,8 @@ def get_shortest_path(
             detail="source_node dan target_node wajib diisi."
         )
 
+    # Build user-to-user graph from Neo4j data.
+    # This keeps shortest path consistent with centrality, clique, and community analysis.
     G_directed = _build_user_graph(source=source, max_edges=max_edges)
     G = G_directed.to_undirected()
 
@@ -751,31 +753,55 @@ def get_shortest_path(
     if not resolved_source:
         raise HTTPException(
             status_code=404,
-            detail=f"Node sumber '{source_node}' tidak ditemukan pada graf."
+            detail=f"Node sumber '{source_node}' tidak ditemukan pada graf user-to-user."
         )
 
     if not resolved_target:
         raise HTTPException(
             status_code=404,
-            detail=f"Node target '{target_node}' tidak ditemukan pada graf."
+            detail=f"Node target '{target_node}' tidak ditemukan pada graf user-to-user."
         )
 
     if resolved_source == resolved_target:
         return {
             "status": "success",
             "source_active": source,
+            "method": "networkx_shortest_path",
+            "graph_type": "user_to_user_interaction_graph",
+            "requested": {
+                "source_node": source_node,
+                "target_node": target_node,
+            },
+            "resolved": {
+                "source_node": resolved_source,
+                "target_node": resolved_target,
+            },
             "path_length": 0,
             "nodes": [_node_to_response(G, resolved_source)],
             "edges": [],
         }
 
     try:
-        path_nodes = nx.shortest_path(G, source=resolved_source, target=resolved_target)
+        path_nodes = nx.shortest_path(
+            G,
+            source=resolved_source,
+            target=resolved_target,
+        )
     except nx.NetworkXNoPath:
         return {
             "status": "not_found",
             "source_active": source,
+            "method": "networkx_shortest_path",
+            "graph_type": "user_to_user_interaction_graph",
             "message": "Tidak ditemukan jalur yang menghubungkan kedua node.",
+            "requested": {
+                "source_node": source_node,
+                "target_node": target_node,
+            },
+            "resolved": {
+                "source_node": resolved_source,
+                "target_node": resolved_target,
+            },
             "path_length": None,
             "nodes": [],
             "edges": [],
@@ -792,16 +818,23 @@ def get_shortest_path(
         elif G_directed.has_edge(next_node, current_node):
             path_edges.append(_edge_to_response(G_directed, next_node, current_node))
         else:
+            edge_data = G.get_edge_data(current_node, next_node, default={})
             path_edges.append({
                 "source": current_node,
                 "target": next_node,
-                "weight": 1,
-                "relation": "INTERACTION",
+                "weight": edge_data.get("weight", 1),
+                "relation": edge_data.get("relation", "INTERACTION"),
             })
 
     return {
         "status": "success",
         "source_active": source,
+        "method": "networkx_shortest_path",
+        "graph_type": "user_to_user_interaction_graph",
+        "graph_info": {
+            "nodes_count": G.number_of_nodes(),
+            "edges_count": G.number_of_edges(),
+        },
         "requested": {
             "source_node": source_node,
             "target_node": target_node,
@@ -815,7 +848,6 @@ def get_shortest_path(
         "edges": path_edges,
     }
 
-
 def get_cliques(
     source: str = "app",
     max_edges: int = 25000,
@@ -823,48 +855,89 @@ def get_cliques(
     limit: int = 10,
 ):
     source = _normalize_source(source)
+    max_edges = _safe_int(max_edges, default=25000, minimum=100, maximum=50000)
     min_size = _safe_int(min_size, default=3, minimum=2, maximum=20)
     limit = _safe_int(limit, default=10, minimum=1, maximum=100)
 
     G_directed = _build_user_graph(source=source, max_edges=max_edges)
     G = G_directed.to_undirected()
 
+    max_cliques_to_scan = 5000
+    scanned_cliques = 0
     cliques = []
 
     for clique_nodes in nx.find_cliques(G):
+        scanned_cliques += 1
+
+        if scanned_cliques > max_cliques_to_scan:
+            break
+
         if len(clique_nodes) < min_size:
             continue
 
-        total_weight = 0.0
+        clique_nodes = list(clique_nodes)
+        subgraph = G.subgraph(clique_nodes)
 
-        for node_a, node_b in nx.Graph(G.subgraph(clique_nodes)).edges():
-            edge_data = G.get_edge_data(node_a, node_b, default={})
-            total_weight += float(edge_data.get("weight", 1))
+        total_weight = 0.0
+        clique_edges = []
+
+        for node_a, node_b, edge_data in subgraph.edges(data=True):
+            weight = float(edge_data.get("weight", 1))
+            total_weight += weight
+
+            clique_edges.append({
+                "source": node_a,
+                "target": node_b,
+                "weight": weight,
+                "relation": edge_data.get("relation", "INTERACTION"),
+            })
+
+        nodes_response = [_node_to_response(G, node_id) for node_id in clique_nodes]
+
+        nodes_response.sort(
+            key=lambda node: G.degree(node["id"], weight="weight"),
+            reverse=True,
+        )
 
         cliques.append({
             "size": len(clique_nodes),
             "total_weight": total_weight,
-            "nodes": [_node_to_response(G, node_id) for node_id in clique_nodes],
+            "density": nx.density(subgraph) if subgraph.number_of_nodes() > 1 else 0,
+            "nodes": nodes_response,
+            "edges": clique_edges,
         })
 
-    cliques.sort(key=lambda item: (item["size"], item["total_weight"]), reverse=True)
+    cliques.sort(
+        key=lambda item: (
+            item["size"],
+            item["total_weight"],
+            item["density"],
+        ),
+        reverse=True,
+    )
 
     return {
         "status": "success",
         "source_active": source,
+        "method": "networkx_find_cliques",
+        "graph_type": "user_to_user_interaction_graph",
         "graph_info": {
             "nodes_count": G.number_of_nodes(),
             "edges_count": G.number_of_edges(),
+            "is_directed_source_graph": True,
+            "is_undirected_for_clique": True,
         },
         "filter": {
             "min_size": min_size,
             "limit": limit,
+            "max_edges": max_edges,
+            "max_cliques_scanned": max_cliques_to_scan,
         },
+        "total_cliques_scanned": scanned_cliques,
         "total_cliques_found": len(cliques),
+        "is_scan_limited": scanned_cliques > max_cliques_to_scan,
         "top_cliques": cliques[:limit],
     }
-
-
 def _community_summary(G: nx.Graph, limit: int = 10):
     community_groups: Dict[str, List[str]] = {}
 

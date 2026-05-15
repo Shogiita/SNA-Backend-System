@@ -760,7 +760,7 @@ def sync_instagram_to_neo4j(is_initial_sync=False):
         print(f"❌ Sinkronisasi Gagal: {e}")
         traceback.print_exc()
 
-
+#dipake
 def get_instagram_metrics(start_date: str = None, end_date: str = None):
     start_time = time.perf_counter()
     now = datetime.now(timezone.utc)
@@ -1201,10 +1201,10 @@ def background_ingestion_task():
         with open(CACHE_FILE, "w", encoding="utf-8") as file:
             json.dump(full_dataset, file, ensure_ascii=False, indent=2)
 
-        print(f"[INGESTION] Selesai. Tersimpan {len(full_dataset)} posts ke cache.")
+        print("[INGESTION] Selesai. Tersimpan {len(full_dataset)} posts ke cache.")
 
     except Exception as e:
-        print(f"[FATAL ERROR] Ingestion gagal: {e}")
+        print("[FATAL ERROR] Ingestion gagal: {e}")
 
 
 def get_dataset_flat():

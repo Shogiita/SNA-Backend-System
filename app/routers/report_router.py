@@ -26,6 +26,55 @@ def get_dashboard_top_content(
         end_date=end_date,
     )
 
+@router.get("/network/edge-weight-schema")
+def get_edge_weight_schema():
+    return {
+        "status": "success",
+        "data": {
+            "items": [
+                {
+                    "type": "WROTE_IG",
+                    "weight": 1,
+                    "description": "Relasi pengguna dengan komentar atau konten yang ditulis di Instagram."
+                },
+                {
+                    "type": "REPLIED_TO_IG",
+                    "weight": 2,
+                    "description": "Relasi balasan antar komentar di Instagram."
+                },
+                {
+                    "type": "MENTIONED_IG",
+                    "weight": 3,
+                    "description": "Relasi mention antar pengguna Instagram."
+                },
+                {
+                    "type": "POSTED_IG",
+                    "weight": 1,
+                    "description": "Relasi pengguna dengan post Instagram yang dibuat."
+                },
+                {
+                    "type": "COMMENTED_ON_IG",
+                    "weight": 1,
+                    "description": "Relasi komentar terhadap post Instagram."
+                },
+                {
+                    "type": "POSTED_FB",
+                    "weight": 1,
+                    "description": "Relasi pengguna dengan konten aplikasi internal yang dibuat."
+                },
+                {
+                    "type": "COMMENTED_ON_FB",
+                    "weight": 1,
+                    "description": "Relasi komentar pada konten aplikasi internal."
+                },
+                {
+                    "type": "LIKES_KAWAN_FB",
+                    "weight": 1,
+                    "description": "Relasi like pada konten Kawan SS."
+                }
+            ]
+        }
+    }
 
 @router.get("/dashboard/network-metrics")
 def get_dashboard_network_metrics(

@@ -2755,6 +2755,8 @@ def _get_actor_name(item):
         or "-"
     )
 
+import traceback
+from fastapi import HTTPException
 
 def _build_network_summary_narrative(source: str, metrics_response: dict):
     data = metrics_response.get("data", {})
@@ -2789,120 +2791,64 @@ def _build_network_summary_narrative(source: str, metrics_response: dict):
 
     top_paths = shortest_path_metrics.get("top_10_paths", [])
 
-    source_label = "Instagram" if source == "instagram" else "aplikasi Suara Surabaya"
+    source_label = "Instagram" if source == "instagram" else "Aplikasi Suara Surabaya"
 
+    # --- KONDISI DATA KOSONG / SEPI ---
     if not degree_top and not betweenness_top and not closeness_top and not eigenvector_top:
         return {
-            "overview": (
-                f"Jaringan sosial pada {source_label} belum memiliki data interaksi yang cukup "
-                f"untuk menghasilkan analisis centrality yang kuat. Hal ini dapat terjadi karena "
-                f"jumlah interaksi antar pengguna masih sedikit atau data graf belum membentuk "
-                f"koneksi yang signifikan."
-            ),
-            "degree_centrality": (
-                "Degree centrality belum dapat menunjukkan aktor dominan karena belum ditemukan "
-                "pengguna dengan koneksi langsung yang cukup kuat."
-            ),
-            "betweenness_centrality": (
-                "Betweenness centrality belum menunjukkan aktor penghubung utama karena struktur "
-                "jaringan belum memiliki jalur penghubung yang jelas antar kelompok pengguna."
-            ),
-            "closeness_centrality": (
-                "Closeness centrality belum dapat menunjukkan aktor yang paling dekat dengan aktor "
-                "lain karena konektivitas jaringan masih terbatas."
-            ),
-            "eigenvector_centrality": (
-                "Eigenvector centrality belum dapat menunjukkan aktor berpengaruh karena belum "
-                "terdapat pola hubungan yang cukup kuat dengan aktor penting lainnya."
-            ),
-            "geodesic_path": (
-                "Geodesic path belum dapat dianalisis secara optimal karena jalur antar aktor dalam "
-                "jaringan masih terbatas."
-            ),
-            "clique": (
-                "Clique belum terdeteksi. Artinya, belum ditemukan kelompok pengguna yang saling "
-                "terhubung secara langsung dalam bentuk sub-jaringan yang rapat."
-            ),
-            "conclusion": (
-                f"Secara umum, jaringan sosial pada {source_label} masih belum cukup padat untuk "
-                f"menunjukkan pola pengaruh, aktor kunci, atau komunitas yang kuat."
-            ),
+            "overview": f"Aktivitas di {source_label} masih terlalu sepi untuk dianalisis.",
+            "degree_centrality": "Pusat Keramaian: Belum ada pengguna yang dominan berinteraksi.",
+            "betweenness_centrality": "Jembatan Penghubung: Belum ada tokoh yang menghubungkan antar kelompok.",
+            "closeness_centrality": "Penyebar Info: Jarak koneksi masih terlalu jauh untuk penyebaran informasi cepat.",
+            "eigenvector_centrality": "Sosok Berpengaruh: Belum terbentuk lingkaran pengguna penting.",
+            "geodesic_path": "Rantai Informasi: Jalur komunikasi masih terputus-putus.",
+            "clique": "Komunitas (Sirkel): Belum ada kelompok ('sirkel') pengguna yang saling terhubung rapat.",
+            "conclusion": "Kesimpulan: Jaringan belum memiliki pola yang jelas karena minimnya interaksi.",
         }
 
-    overview = (
-        f"Berdasarkan hasil analisis jaringan sosial pada {source_label}, terlihat bahwa struktur "
-        f"jaringan terbentuk dari aktivitas interaksi antar pengguna. Interaksi tersebut membentuk "
-        f"pola hubungan yang dapat dianalisis melalui degree centrality, betweenness centrality, "
-        f"closeness centrality, eigenvector centrality, geodesic path, dan clique."
-    )
+    # --- KONDISI DATA TERSEDIA (SINGKAT & JELAS) ---
+    overview = f"Ringkasan pola interaksi pengguna di {source_label}:"
 
     degree_summary = (
-        f"Pada metrik degree centrality, aktor dengan nilai tertinggi adalah {degree_name} "
-        f"dengan nilai {degree_value}. Hal ini menunjukkan bahwa aktor tersebut memiliki jumlah "
-        f"koneksi langsung paling tinggi dibandingkan pengguna lain. Dalam konteks jaringan sosial, "
-        f"aktor ini dapat dianggap sebagai pengguna yang aktif atau populer karena banyak terlibat "
-        f"dalam interaksi langsung."
+        f"Pusat Keramaian (Degree): {degree_name} (skor: {degree_value}) adalah pengguna paling aktif berinteraksi "
+        f"dan paling banyak mendapat respons."
     )
 
     betweenness_summary = (
-        f"Pada metrik betweenness centrality, aktor dengan nilai tertinggi adalah {betweenness_name} "
-        f"dengan nilai {betweenness_value}. Nilai ini menunjukkan bahwa aktor tersebut memiliki peran "
-        f"sebagai penghubung antar pengguna atau antar kelompok dalam jaringan. Semakin tinggi nilai "
-        f"betweenness, semakin besar kemungkinan aktor tersebut menjadi perantara dalam penyebaran "
-        f"informasi."
+        f"Jembatan Penghubung (Betweenness): {betweenness_name} (skor: {betweenness_value}) sangat penting untuk "
+        f"menghubungkan berbagai kelompok pengguna yang berbeda agar informasi tidak terputus."
     )
 
     closeness_summary = (
-        f"Pada metrik closeness centrality, aktor dengan nilai tertinggi adalah {closeness_name} "
-        f"dengan nilai {closeness_value}. Hal ini menunjukkan bahwa aktor tersebut memiliki jarak "
-        f"yang relatif lebih dekat ke aktor-aktor lain dalam jaringan. Aktor dengan closeness tinggi "
-        f"berpotensi menjangkau pengguna lain secara lebih cepat."
+        f"Penyebar Info Tercepat (Closeness): {closeness_name} (skor: {closeness_value}) memiliki posisi paling strategis "
+        f"untuk menyebarkan informasi ke seluruh jaringan dengan rute tersingkat."
     )
 
     eigenvector_summary = (
-        f"Pada metrik eigenvector centrality, aktor dengan nilai tertinggi adalah {eigenvector_name} "
-        f"dengan nilai {eigenvector_value}. Metrik ini menunjukkan bahwa aktor tersebut tidak hanya "
-        f"memiliki banyak koneksi, tetapi juga terhubung dengan aktor lain yang memiliki pengaruh "
-        f"tinggi. Dengan demikian, aktor ini dapat dipandang sebagai salah satu aktor paling berpengaruh "
-        f"dalam struktur jaringan."
+        f"Sosok Paling Berpengaruh (Eigenvector): {eigenvector_name} (skor: {eigenvector_value}) adalah tokoh utama "
+        f"karena ia terkoneksi langsung dengan pengguna-pengguna penting lainnya."
     )
 
     if top_paths:
         geodesic_summary = (
-            f"Analisis geodesic path menunjukkan bahwa rata-rata jarak sosial dalam jaringan adalah "
-            f"sekitar {average_distance} langkah, dengan rata-rata diameter jaringan sebesar "
-            f"{average_diameter}. Nilai ini menggambarkan seberapa jauh pengguna harus melewati "
-            f"aktor lain untuk dapat terhubung. Semakin kecil jarak geodesic, semakin cepat informasi "
-            f"dapat menyebar di dalam jaringan."
+            f"Rantai Informasi (Geodesic): Sebuah informasi rata-rata hanya butuh melewati {average_distance} orang "
+            f"untuk menyebar luas, dengan batas maksimal {average_diameter} orang."
         )
     else:
-        geodesic_summary = (
-            "Analisis geodesic path belum menemukan sampel jalur yang cukup kuat antar aktor. "
-            "Hal ini dapat menunjukkan bahwa jaringan masih terfragmentasi atau sebagian besar "
-            "pengguna belum saling terhubung secara langsung maupun tidak langsung."
-        )
+        geodesic_summary = "Rantai Informasi (Geodesic): Koneksi belum membentuk rantai yang utuh untuk diukur kecepatannya."
 
     if total_cliques > 0:
         clique_summary = (
-            f"Pada analisis clique, ditemukan {total_cliques} kelompok clique dalam jaringan. "
-            f"Clique terbesar memiliki {largest_clique_size} anggota. Hal ini menunjukkan adanya "
-            f"sub-kelompok pengguna yang saling terhubung secara langsung. Kelompok seperti ini "
-            f"dapat menjadi indikasi adanya komunitas kecil yang memiliki intensitas interaksi tinggi."
+            f"Komunitas (Sirkel): Terdapat {total_cliques} kelompok ('sirkel') akrab, dengan sirkel terbesar "
+            f"berisi {largest_clique_size} orang yang saling berinteraksi penuh."
         )
     else:
-        clique_summary = (
-            "Pada analisis clique, belum ditemukan kelompok pengguna yang membentuk hubungan saling "
-            "terhubung secara penuh. Hal ini menunjukkan bahwa interaksi pengguna belum membentuk "
-            "sub-komunitas yang benar-benar rapat."
-        )
+        clique_summary = "Komunitas (Sirkel): Belum ditemukan komunitas kecil yang anggotanya saling berinteraksi penuh."
 
     conclusion = (
-        f"Secara keseluruhan, jaringan sosial pada {source_label} menunjukkan bahwa aktor dengan "
-        f"koneksi langsung tinggi dapat diidentifikasi melalui degree centrality, aktor penghubung "
-        f"dapat dilihat melalui betweenness centrality, aktor yang paling mudah menjangkau jaringan "
-        f"dapat dilihat melalui closeness centrality, dan aktor berpengaruh dapat dilihat melalui "
-        f"eigenvector centrality. Hasil ini dapat digunakan untuk memahami pola interaksi, menemukan "
-        f"aktor kunci, serta melihat potensi terbentuknya komunitas dalam jaringan sosial."
+        f"Kesimpulan: Ekosistem {source_label} digerakkan oleh {degree_name} yang memimpin keramaian, {betweenness_name} "
+        f"yang menjaga koneksi antar kelompok, {closeness_name} yang mempercepat arus info, dan {eigenvector_name} sebagai "
+        f"pemegang pengaruh terkuat."
     )
 
     return {
@@ -2946,8 +2892,7 @@ def _build_network_summary_narrative(source: str, metrics_response: dict):
             },
         },
     }
-
-
+    
 def get_network_analysis_summary(source: str = "app"):
     try:
         source = (source or "app").strip().lower()
