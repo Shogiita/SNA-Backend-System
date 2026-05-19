@@ -16,7 +16,7 @@ from app.utils.sna_filter_utils import (
     is_ignored_instagram_user,
 )
 
-MENTION_REGEX = re.compile(r"@([A-Za-z0-9._]+)")
+MENTION_REGEX = re.compile(r"@([A-Za-z0-9_](?:[A-Za-z0-9._]*[A-Za-z0-9_])?)")
 
 def _safe_int(value, default: int, minimum: int, maximum: int) -> int:
     try:
@@ -1150,6 +1150,14 @@ def list_monthly_report_history(limit: int = 20):
             "message": str(error),
             "reports": [],
         }
+
+
+def generate_monthly_report(
+    source: str = "app",
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    save_history: bool = False,
+):
     source = _normalize_source(source)
 
     now = datetime.now()
