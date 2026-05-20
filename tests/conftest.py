@@ -33,12 +33,21 @@ os.environ.setdefault(
     "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCtest\\n"
     "-----END PRIVATE KEY-----\\n",
 )
-os.environ.setdefault("FIREBASE_CLIENT_EMAIL", "firebase-adminsdk-test@test-project.iam.gserviceaccount.com")
+os.environ.setdefault(
+    "FIREBASE_CLIENT_EMAIL",
+    "firebase-adminsdk-test@test-project.iam.gserviceaccount.com",
+)
 os.environ.setdefault("FIREBASE_CLIENT_ID", "test_client_id")
 os.environ.setdefault("FIREBASE_AUTH_URI", "https://accounts.google.com/o/oauth2/auth")
 os.environ.setdefault("FIREBASE_TOKEN_URI", "https://oauth2.googleapis.com/token")
-os.environ.setdefault("FIREBASE_AUTH_PROVIDER_CERT_URL", "https://www.googleapis.com/oauth2/v1/certs")
-os.environ.setdefault("FIREBASE_CLIENT_CERT_URL", "https://www.googleapis.com/robot/v1/metadata/x509/test")
+os.environ.setdefault(
+    "FIREBASE_AUTH_PROVIDER_CERT_URL",
+    "https://www.googleapis.com/oauth2/v1/certs",
+)
+os.environ.setdefault(
+    "FIREBASE_CLIENT_CERT_URL",
+    "https://www.googleapis.com/robot/v1/metadata/x509/test",
+)
 
 os.environ.setdefault("GA_PROPERTY_ID", "test_ga_property_id")
 
@@ -55,8 +64,14 @@ os.environ.setdefault("GCP_CLIENT_EMAIL", "test@test-project.iam.gserviceaccount
 os.environ.setdefault("GCP_CLIENT_ID", "test_gcp_client_id")
 os.environ.setdefault("GCP_AUTH_URI", "https://accounts.google.com/o/oauth2/auth")
 os.environ.setdefault("GCP_TOKEN_URI", "https://oauth2.googleapis.com/token")
-os.environ.setdefault("GCP_AUTH_PROVIDER_CERT_URL", "https://www.googleapis.com/oauth2/v1/certs")
-os.environ.setdefault("GCP_CLIENT_CERT_URL", "https://www.googleapis.com/robot/v1/metadata/x509/test")
+os.environ.setdefault(
+    "GCP_AUTH_PROVIDER_CERT_URL",
+    "https://www.googleapis.com/oauth2/v1/certs",
+)
+os.environ.setdefault(
+    "GCP_CLIENT_CERT_URL",
+    "https://www.googleapis.com/robot/v1/metadata/x509/test",
+)
 
 
 # ============================================================
@@ -66,6 +81,10 @@ os.environ.setdefault("GCP_CLIENT_CERT_URL", "https://www.googleapis.com/robot/v
 fake_database_module = types.ModuleType("app.database")
 fake_database_module.db = MagicMock(name="mock_firestore_db")
 fake_database_module.neo4j_driver = MagicMock(name="mock_neo4j_driver")
+fake_database_module.get_neo4j_session = MagicMock(
+    name="get_neo4j_session",
+    return_value=fake_database_module.neo4j_driver.session.return_value,
+)
 
 sys.modules["app.database"] = fake_database_module
 
@@ -81,6 +100,7 @@ fake_firebase_firestore = types.ModuleType("firebase_admin.firestore")
 
 fake_firebase_admin._apps = {"test": object()}
 fake_firebase_admin.initialize_app = MagicMock(name="initialize_app")
+fake_firebase_admin.get_app = MagicMock(return_value=object())
 
 fake_firebase_auth.verify_id_token = MagicMock(
     return_value={
@@ -105,7 +125,7 @@ sys.modules["firebase_admin.firestore"] = fake_firebase_firestore
 
 
 # ============================================================
-# FIXTURE
+# FIXTURES
 # ============================================================
 
 @pytest.fixture(scope="function")
@@ -138,7 +158,9 @@ def api_client(mock_admin):
 
     app.dependency_overrides[get_current_admin] = lambda: mock_admin
 
-    with TestClient(app) as client:
-        yield client
+    client = TestClient(app)
 
+    yield client
+
+    client.close()
     app.dependency_overrides.clear()

@@ -3,7 +3,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 
-def test_export_csv_success(api_client, mock_admin):
+def test_export_csv_success(api_client):
     expected = {
         "status": "success",
         "message": "CSV berhasil dibuat.",
@@ -27,14 +27,13 @@ def test_export_csv_success(api_client, mock_admin):
     assert response.status_code == 200
     assert response.json() == expected
 
-    called_payload, called_admin = mock_controller.call_args.args
+    called_payload = mock_controller.call_args.args[0]
     assert called_payload.source == "app"
     assert called_payload.export_all is False
     assert called_payload.selected_columns == ["likes", "comment"]
-    assert called_admin == mock_admin
 
 
-def test_export_sheets_success(api_client, mock_admin):
+def test_export_existing_sheets_success(api_client):
     expected = {
         "status": "success",
         "message": "Data berhasil diexport ke Google Sheets.",
@@ -44,26 +43,31 @@ def test_export_sheets_success(api_client, mock_admin):
     payload = {
         "source": "instagram",
         "export_all": True,
-        "spreadsheet_title": "SNA Instagram Export",
-        "google_access_token": "google-token-test",
+        "spreadsheet_id": "spreadsheet_test_id",
+        "worksheet_name": "Export Data",
     }
 
     with patch(
-        "app.routers.integration_router.integration_controller.export_sheets",
+        "app.routers.integration_router.integration_controller.export_existing_sheets",
         return_value=expected,
     ) as mock_controller:
-        response = api_client.post("/integration/export/sheets", json=payload)
+        response = api_client.post(
+            "/integration/export/sheets/existing",
+            json=payload,
+        )
 
     assert response.status_code == 200
     assert response.json() == expected
 
-    called_payload, called_admin = mock_controller.call_args.args
+    called_payload = mock_controller.call_args.args[0]
+    called_admin = mock_controller.call_args.kwargs["current_admin"]
+
     assert called_payload.source == "instagram"
-    assert called_payload.spreadsheet_title == "SNA Instagram Export"
-    assert called_admin == mock_admin
+    assert called_payload.spreadsheet_id == "spreadsheet_test_id"
+    assert called_admin is None
 
 
-def test_get_linked_sheets_success(api_client, mock_admin):
+def test_get_linked_sheets_success(api_client):
     expected = {
         "status": "success",
         "data": [
@@ -83,10 +87,10 @@ def test_get_linked_sheets_success(api_client, mock_admin):
 
     assert response.status_code == 200
     assert response.json() == expected
-    mock_controller.assert_called_once_with(mock_admin)
+    mock_controller.assert_called_once_with(current_admin=None)
 
 
-def test_unlink_sheet_success(api_client, mock_admin):
+def test_unlink_sheet_success(api_client):
     expected = {
         "status": "success",
         "message": "Spreadsheet berhasil di-unlink.",
@@ -100,7 +104,7 @@ def test_unlink_sheet_success(api_client, mock_admin):
 
     assert response.status_code == 200
     assert response.json() == expected
-    mock_controller.assert_called_once_with("doc_123", mock_admin)
+    mock_controller.assert_called_once_with("doc_123", current_admin=None)
 
 
 def test_unlink_sheet_not_found(api_client):

@@ -81,6 +81,7 @@ def test_create_instagram_visualization_graph_success(api_client):
         "app.routers.sna_router.sna_controller.create_instagram_graph_visualization_from_neo4j",
         new_callable=AsyncMock,
         return_value=expected,
+        create=True,
     ) as mock_controller:
         response = api_client.post(
             "/sna/neo4j/visualization/instagram",
@@ -118,10 +119,9 @@ def test_visualize_neo4j_network_success(api_client):
         )
 
     assert response.status_code == 200
-
     assert response.json() == expected_html
-
     mock_controller.assert_awaited_once_with(mode=1, limit=50)
+
 
 def test_manual_sync_instagram_to_neo4j_success(api_client):
     with patch(

@@ -920,6 +920,8 @@ def get_cliques(
         "is_scan_limited": scanned_cliques > max_cliques_to_scan,
         "top_cliques": cliques[:limit],
     }
+
+    
 def _community_summary(G: nx.Graph, limit: int = 10):
     community_groups: Dict[str, List[str]] = {}
 

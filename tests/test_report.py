@@ -72,7 +72,7 @@ def test_get_dashboard_network_metrics_success(api_client):
     }
 
     with patch(
-        "app.routers.report_router.report_controller.get_network_metrics_summary",
+        "app.routers.report_router.network_analysis_controller.get_network_metrics_full_summary",
         return_value=expected,
     ) as mock_controller:
         response = api_client.get(

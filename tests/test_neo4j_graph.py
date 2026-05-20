@@ -7,18 +7,22 @@ def test_visualize_graph_from_neo4j_success(api_client):
     expected_html = "<html><body>Graph Visualization</body></html>"
 
     with patch(
-        "app.routers.sna_router.neo4j_graph_controller.visualize_graph_from_neo4j",
+        "app.routers.sna_router.sna_controller.visualize_neo4j_network",
         new_callable=AsyncMock,
         return_value=expected_html,
+        create=True,
     ) as mock_controller:
-        response = api_client.get("/sna/snagraph/visualize?limit=10&mode=1")
+        response = api_client.get(
+            "/sna/neo4j/visualize",
+            params={
+                "mode": 1,
+                "limit": 10,
+            },
+        )
 
     assert response.status_code == 200
-
-    # Endpoint mengembalikan string biasa, sehingga FastAPI serialize sebagai JSON string.
     assert response.json() == expected_html
-
-    mock_controller.assert_awaited_once_with(limit=10, mode=1)
+    mock_controller.assert_awaited_once_with(mode=1, limit=10)
 
 
 def test_create_app_visualization_graph_success(api_client):
@@ -37,6 +41,7 @@ def test_create_app_visualization_graph_success(api_client):
         "app.routers.sna_router.neo4j_graph_controller.create_graph_visualization_from_neo4j",
         new_callable=AsyncMock,
         return_value=expected,
+        create=True,
     ) as mock_controller:
         response = api_client.post(
             "/sna/neo4j/visualization/app",
@@ -64,6 +69,7 @@ def test_create_app_visualization_graph_empty(api_client):
             status_code=404,
             detail="Tidak ada relasi data yang ditemukan di Neo4j.",
         ),
+        create=True,
     ):
         response = api_client.post("/sna/neo4j/visualization/app")
 

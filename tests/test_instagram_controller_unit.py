@@ -1,14 +1,14 @@
-import os
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 
-from app.controllers import auth_controller
+from app.controllers import instagram_controller
 
 
 class MockAsyncClient:
-    def __init__(self, response=None, exception=None):
+    def __init__(self, response=None, exception=None, *args, **kwargs):
         self.response = response
         self.exception = exception
 
@@ -24,135 +24,134 @@ class MockAsyncClient:
         return self.response
 
 
-def test_update_env_file_updates_existing_key(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "INSTAGRAM_ACCESS_TOKEN=old_token\nOTHER_KEY=value\n",
-        encoding="utf-8",
-    )
-
-    auth_controller.update_env_file("INSTAGRAM_ACCESS_TOKEN", "new_token")
-
-    content = env_file.read_text(encoding="utf-8")
-    assert "INSTAGRAM_ACCESS_TOKEN=new_token" in content
-    assert "OTHER_KEY=value" in content
-
-
-def test_update_env_file_adds_key_when_missing(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-
-    env_file = tmp_path / ".env"
-    env_file.write_text("OTHER_KEY=value\n", encoding="utf-8")
-
-    auth_controller.update_env_file("INSTAGRAM_ACCESS_TOKEN", "new_token")
-
-    content = env_file.read_text(encoding="utf-8")
-    assert "OTHER_KEY=value" in content
-    assert "INSTAGRAM_ACCESS_TOKEN=new_token" in content
-
-
-def test_update_env_file_does_nothing_when_env_missing(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-
-    auth_controller.update_env_file("INSTAGRAM_ACCESS_TOKEN", "new_token")
-
-    assert not (tmp_path / ".env").exists()
-
-
 @pytest.mark.asyncio
-async def test_refresh_instagram_token_success(monkeypatch):
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "access_token": "new_long_lived_token_12345",
-        "expires_in": 5184000,
-    }
-
-    monkeypatch.setattr(auth_controller.config, "IG_ACCESS_TOKEN", "old_token")
-    monkeypatch.setattr(auth_controller.config, "IG_APP_ID", "app_id")
-    monkeypatch.setattr(auth_controller.config, "IG_APP_SECRET", "app_secret")
-    monkeypatch.setattr(auth_controller, "update_env_file", MagicMock())
-
-    monkeypatch.setattr(
-        auth_controller.httpx,
-        "AsyncClient",
-        lambda: MockAsyncClient(response=mock_response),
-    )
-
-    result = await auth_controller.refresh_instagram_token()
-
-    assert result["status"] == "success"
-    assert result["expires_in_days"] == 60
-    assert result["preview"] == "new_long_lived..."
-    assert auth_controller.config.IG_ACCESS_TOKEN == "new_long_lived_token_12345"
-    auth_controller.update_env_file.assert_called_once_with(
-        "INSTAGRAM_ACCESS_TOKEN",
-        "new_long_lived_token_12345",
-    )
-
-
-@pytest.mark.asyncio
-async def test_refresh_instagram_token_without_current_token(monkeypatch):
-    monkeypatch.setattr(auth_controller.config, "IG_ACCESS_TOKEN", None)
+async def test_check_config_missing_business_account_id(monkeypatch):
+    monkeypatch.setattr(instagram_controller.config, "IG_BUSINESS_ACCOUNT_ID", None)
+    monkeypatch.setattr(instagram_controller.config, "IG_ACCESS_TOKEN", "token")
 
     with pytest.raises(HTTPException) as excinfo:
-        await auth_controller.refresh_instagram_token()
+        await instagram_controller._check_config()
 
-    assert excinfo.value.status_code == 400
-    assert "Token tidak ditemukan" in excinfo.value.detail
+    assert excinfo.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert "IG_BUSINESS_ACCOUNT_ID" in excinfo.value.detail
 
 
 @pytest.mark.asyncio
-async def test_refresh_instagram_token_api_error_becomes_internal_error(monkeypatch):
+async def test_check_config_missing_access_token(monkeypatch):
+    monkeypatch.setattr(instagram_controller.config, "IG_BUSINESS_ACCOUNT_ID", "business_id")
+    monkeypatch.setattr(instagram_controller.config, "IG_ACCESS_TOKEN", None)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await instagram_controller._check_config()
+
+    assert excinfo.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "IG_ACCESS_TOKEN" in excinfo.value.detail
+
+
+@pytest.mark.asyncio
+async def test_make_ig_api_request_success(monkeypatch):
     mock_response = MagicMock()
-    mock_response.status_code = 400
+    mock_response.raise_for_status.return_value = None
     mock_response.json.return_value = {
-        "error": {
-            "message": "Token expired",
-        }
+        "id": "123",
+        "username": "suarasurabaya",
     }
 
-    monkeypatch.setattr(auth_controller.config, "IG_ACCESS_TOKEN", "old_token")
-    monkeypatch.setattr(auth_controller.config, "IG_APP_ID", "app_id")
-    monkeypatch.setattr(auth_controller.config, "IG_APP_SECRET", "app_secret")
+    monkeypatch.setattr(instagram_controller.config, "IG_BUSINESS_ACCOUNT_ID", "business_id")
+    monkeypatch.setattr(instagram_controller.config, "IG_ACCESS_TOKEN", "token")
+    monkeypatch.setattr(instagram_controller.config, "GRAPH_API_URL", "https://graph.facebook.com/v19.0")
 
     monkeypatch.setattr(
-        auth_controller.httpx,
+        instagram_controller.httpx,
         "AsyncClient",
-        lambda: MockAsyncClient(response=mock_response),
+        lambda *args, **kwargs: MockAsyncClient(response=mock_response),
+    )
+
+    result = await instagram_controller._make_ig_api_request(
+        endpoint="/business_id",
+        params={"fields": "id,username"},
+    )
+
+    assert result == {
+        "id": "123",
+        "username": "suarasurabaya",
+    }
+
+
+@pytest.mark.asyncio
+async def test_make_ig_api_request_http_status_error(monkeypatch):
+    request = httpx.Request("GET", "https://graph.facebook.com/v19.0/test")
+    response = httpx.Response(
+        status_code=401,
+        json={
+            "error": {
+                "message": "Invalid OAuth access token.",
+            }
+        },
+        request=request,
+    )
+
+    http_error = httpx.HTTPStatusError(
+        message="401 Unauthorized",
+        request=request,
+        response=response,
+    )
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status.side_effect = http_error
+
+    monkeypatch.setattr(instagram_controller.config, "IG_BUSINESS_ACCOUNT_ID", "business_id")
+    monkeypatch.setattr(instagram_controller.config, "IG_ACCESS_TOKEN", "token")
+
+    monkeypatch.setattr(
+        instagram_controller.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: MockAsyncClient(response=mock_response),
     )
 
     with pytest.raises(HTTPException) as excinfo:
-        await auth_controller.refresh_instagram_token()
+        await instagram_controller._make_ig_api_request("business_id")
 
-    # Controller saat ini menangkap HTTPException di except Exception,
-    # sehingga status akhirnya menjadi 500.
-    assert excinfo.value.status_code == 500
-    assert "Token expired" in excinfo.value.detail
+    assert excinfo.value.status_code == 401
+    assert "Invalid OAuth access token" in excinfo.value.detail
 
 
 @pytest.mark.asyncio
-async def test_refresh_instagram_token_no_access_token_in_success_response(monkeypatch):
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "expires_in": 5184000,
-    }
+async def test_make_ig_api_request_request_error(monkeypatch):
+    request = httpx.Request("GET", "https://graph.facebook.com/v19.0/test")
+    request_error = httpx.RequestError("Connection failed", request=request)
 
-    monkeypatch.setattr(auth_controller.config, "IG_ACCESS_TOKEN", "old_token")
-    monkeypatch.setattr(auth_controller.config, "IG_APP_ID", "app_id")
-    monkeypatch.setattr(auth_controller.config, "IG_APP_SECRET", "app_secret")
+    monkeypatch.setattr(instagram_controller.config, "IG_BUSINESS_ACCOUNT_ID", "business_id")
+    monkeypatch.setattr(instagram_controller.config, "IG_ACCESS_TOKEN", "token")
 
     monkeypatch.setattr(
-        auth_controller.httpx,
+        instagram_controller.httpx,
         "AsyncClient",
-        lambda: MockAsyncClient(response=mock_response),
+        lambda *args, **kwargs: MockAsyncClient(exception=request_error),
     )
 
     with pytest.raises(HTTPException) as excinfo:
-        await auth_controller.refresh_instagram_token()
+        await instagram_controller._make_ig_api_request("business_id")
 
-    assert excinfo.value.status_code == 400
-    assert "Gagal memperbarui token" in excinfo.value.detail
+    assert excinfo.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert "Gagal menghubungi Instagram API" in excinfo.value.detail
+
+
+@pytest.mark.asyncio
+async def test_get_user_profile_success(monkeypatch):
+    expected = {
+        "id": "123",
+        "username": "suarasurabaya",
+    }
+
+    async def mock_make_request(endpoint, params=None):
+        assert endpoint == "business_id"
+        assert "fields" in params
+        return expected
+
+    monkeypatch.setattr(instagram_controller.config, "IG_BUSINESS_ACCOUNT_ID", "business_id")
+    monkeypatch.setattr(instagram_controller, "_make_ig_api_request", mock_make_request)
+
+    result = await instagram_controller.get_user_profile()
+
+    assert result == expected

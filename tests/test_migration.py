@@ -72,6 +72,7 @@ def test_clear_all_neo4j_data_success(api_client):
         "app.routers.neo4j_router.neo4j_migration_controller.delete_all_neo4j_data",
         new_callable=AsyncMock,
         return_value=expected,
+        create=True,
     ) as mock_controller:
         response = api_client.delete("/neo4j/clear-all")
 
