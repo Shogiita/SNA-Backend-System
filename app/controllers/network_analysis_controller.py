@@ -724,8 +724,6 @@ def get_shortest_path(
             detail="source_node dan target_node wajib diisi."
         )
 
-    # Build user-to-user graph from Neo4j data.
-    # This keeps shortest path consistent with centrality, clique, and community analysis.
     G_directed = _build_user_graph(source=source, max_edges=max_edges)
     G = G_directed.to_undirected()
 

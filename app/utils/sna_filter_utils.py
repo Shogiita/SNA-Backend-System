@@ -161,20 +161,6 @@ def prepare_graph_for_centrality(graph: nx.Graph | nx.DiGraph):
 
 
 def calculate_centrality(graph: nx.Graph | nx.DiGraph) -> dict:
-    """
-    Centrality dihitung setelah node unwanted dibersihkan.
-
-    degree:
-        untuk directed graph memakai total degree centrality.
-    in_degree/out_degree:
-        khusus directed graph.
-    betweenness:
-        memakai distance = 1 / weight.
-    closeness:
-        memakai distance = 1 / weight.
-    eigenvector:
-        fallback ke pagerank jika tidak konvergen.
-    """
     if graph.number_of_nodes() == 0:
         return {
             "degree": {},

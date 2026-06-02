@@ -43,10 +43,79 @@ os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
 
 session = requests.Session()
 
+def _short_text(text: str, max_length: int = 50) -> str:
+    text = str(text or "").replace("\n", " ").replace("\r", " ").strip()
+
+    if len(text) <= max_length:
+        return text
+
+    return f"{text[:max_length].strip()}..."
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _extract_valid_hashtags(text: str) -> list[str]:
+    tags = set()
+
+    for raw_tag in HASHTAG_REGEX.findall(str(text or "")):
+        tag = normalize_hashtag(raw_tag)
+
+        if not tag:
+            continue
+
+        tag = str(tag).strip().lower().lstrip("#")
+
+        if not tag or is_ignored_hashtag(tag):
+            continue
+
+        tags.add(tag)
+
+    return sorted(tags)
+
+
+def _build_hashtag_list(text: str) -> list[str]:
+    return [
+        f"#{tag}"
+        for tag in _extract_valid_hashtags(text)
+    ]
+
+
+def _add_hashtag_nodes_and_edges(
+    graph: nx.DiGraph,
+    source_node: str,
+    text: str,
+) -> None:
+    for tag in _extract_valid_hashtags(text):
+        hashtag_text = f"#{tag}"
+        hashtag_node = f"tag_{tag}"
+
+        if not graph.has_node(hashtag_node):
+            graph.add_node(
+                hashtag_node,
+                type="hashtag",
+                label=hashtag_text,
+                name=hashtag_text,
+                hashtag=hashtag_text,
+                text=hashtag_text,
+                content=hashtag_text,
+            )
+
+        graph.add_edge(
+            source_node,
+            hashtag_node,
+            relation="HAS_HASHTAG",
+            weight=2,
+        )
+
 async def create_instagram_graph_visualization_from_neo4j(
     limit: int = 5000,
     mode: int = 2,
-    max_edges: int = 25000
+    max_edges: int = 25000,
 ):
     try:
         safe_limit = max(1, min(int(limit), 25000))
@@ -63,7 +132,7 @@ async def create_instagram_graph_visualization_from_neo4j(
         if G.number_of_nodes() == 0:
             raise HTTPException(
                 status_code=404,
-                detail="Tidak ada relasi data Instagram yang ditemukan di Neo4j."
+                detail="Tidak ada relasi data Instagram yang ditemukan di Neo4j.",
             )
 
         degree_map = dict(G.degree(weight="weight"))
@@ -71,7 +140,7 @@ async def create_instagram_graph_visualization_from_neo4j(
         sorted_nodes = sorted(
             G.nodes(),
             key=lambda node: degree_map.get(node, 0),
-            reverse=True
+            reverse=True,
         )
 
         selected_nodes = set(sorted_nodes[:safe_limit])
@@ -82,7 +151,7 @@ async def create_instagram_graph_visualization_from_neo4j(
         sorted_edges = sorted(
             H.edges(data=True),
             key=lambda edge: edge[2].get("weight", 1),
-            reverse=True
+            reverse=True,
         )[:safe_max_edges]
 
         edge_node_ids = set()
@@ -96,26 +165,102 @@ async def create_instagram_graph_visualization_from_neo4j(
         if H.number_of_nodes() == 0:
             raise HTTPException(
                 status_code=404,
-                detail="Tidak ada node yang tersisa setelah filtering visualisasi."
+                detail="Tidak ada node yang tersisa setelah filtering visualisasi.",
             )
 
-        community_map = apply_leiden_communities(H, weight_attr="weight")
+        community_map = apply_leiden_communities(
+            H,
+            weight_attr="weight",
+            community_attr="community",
+        )
+
+        community_summaries = H.graph.get("communities", [])
+        community_summary_by_id = {
+            summary.get("id"): summary
+            for summary in community_summaries
+            if isinstance(summary, dict)
+        }
 
         degree_map = dict(H.degree(weight="weight"))
         max_degree = max(degree_map.values()) if degree_map else 1
 
+        cluster_size_map = {}
+
+        for cluster_id in community_map.values():
+            cluster_size_map[cluster_id] = cluster_size_map.get(cluster_id, 0) + 1
+
         nodes_output = []
 
         for node in H.nodes():
-            attr = H.nodes[node].copy()
-            community_id = community_map.get(node, attr.get("community", 0))
+            attr = dict(H.nodes[node])
+
+            community_id = _safe_int(
+                community_map.get(node, attr.get("community", 0)),
+                default=0,
+            )
+
+            summary = community_summary_by_id.get(community_id, {})
+
+            cluster_size = _safe_int(
+                attr.get(
+                    "cluster_size",
+                    summary.get(
+                        "count",
+                        cluster_size_map.get(community_id, 1),
+                    ),
+                ),
+                default=1,
+            )
+
+            community_label = (
+                attr.get("community_label")
+                or summary.get("label")
+                or f"Community {community_id + 1}"
+            )
+
+            community_description = (
+                attr.get("community_description")
+                or summary.get("description")
+                or "Community hasil deteksi Leiden."
+            )
+
+            top_hashtags = attr.get("top_hashtags") or summary.get("top_hashtags", [])
+            top_posts = attr.get("top_posts") or summary.get("top_posts", [])
+            top_mentions = attr.get("top_mentions") or summary.get("top_mentions", [])
+            dominant_type = attr.get("dominant_type") or summary.get("dominant_type")
+
+            cluster_label = str(
+                attr.get("cluster_label")
+                or community_label
+            )
+
             attr["community"] = community_id
+            attr["cluster_id"] = community_id
+            attr["cluster_size"] = cluster_size
+            attr["cluster_label"] = cluster_label
+            attr["community_label"] = community_label
+            attr["community_description"] = community_description
+            attr["top_hashtags"] = top_hashtags
+            attr["top_posts"] = top_posts
+            attr["top_mentions"] = top_mentions
+            attr["dominant_type"] = dominant_type
 
             degree = degree_map.get(node, 0)
 
             nodes_output.append({
                 "id": node,
+                "label": attr.get("label", str(node)),
+                "type": attr.get("type", "node"),
                 "community": community_id,
+                "cluster_id": community_id,
+                "cluster_size": cluster_size,
+                "cluster_label": cluster_label,
+                "community_label": community_label,
+                "community_description": community_description,
+                "top_hashtags": top_hashtags,
+                "top_posts": top_posts,
+                "top_mentions": top_mentions,
+                "dominant_type": dominant_type,
                 "attributes": attr,
                 "metrics": {
                     "degree": degree / max_degree if max_degree else 0.0,
@@ -123,8 +268,8 @@ async def create_instagram_graph_visualization_from_neo4j(
                     "betweenness": 0.0,
                     "closeness": 0.0,
                     "eigenvector": 0.0,
-                    "pagerank": 0.0
-                }
+                    "pagerank": 0.0,
+                },
             })
 
         valid_nodes = {node["id"] for node in nodes_output}
@@ -140,8 +285,9 @@ async def create_instagram_graph_visualization_from_neo4j(
                 "target": target,
                 "weight": data.get("weight", 1),
                 "attributes": {
-                    "relation": data.get("relation", "INTERACTION")
-                }
+                    "relation": data.get("relation", "INTERACTION"),
+                    "weight": data.get("weight", 1),
+                },
             })
 
         return {
@@ -150,15 +296,24 @@ async def create_instagram_graph_visualization_from_neo4j(
                 f"Graf visualisasi Instagram berhasil dibuat "
                 f"(Nodes: {len(nodes_output)}, Edges: {len(edges_output)}, Mode: {mode})."
             ),
+            "meta": {
+                "total_nodes": len(nodes_output),
+                "total_edges": len(edges_output),
+                "total_communities": len(community_summaries),
+                "communities": community_summaries,
+            },
             "graph_info": {
                 "nodes_count": len(nodes_output),
                 "edges_count": len(edges_output),
-                "communities_count": len(set(community_map.values())),
+                "communities_count": len(community_summaries),
+                "clusters_count": len(community_summaries),
                 "limit": safe_limit,
                 "max_edges": safe_max_edges,
+                "communities": community_summaries,
+                "community_summaries": community_summaries,
                 "nodes": nodes_output,
-                "edges": edges_output
-            }
+                "edges": edges_output,
+            },
         }
 
     except HTTPException:
@@ -169,7 +324,7 @@ async def create_instagram_graph_visualization_from_neo4j(
 
         raise HTTPException(
             status_code=500,
-            detail=f"Gagal membuat graf visualisasi Instagram Neo4j: {str(e)}"
+            detail=f"Gagal membuat graf visualisasi Instagram Neo4j: {str(e)}",
         )
 
 def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
@@ -216,7 +371,7 @@ def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
 
             records = session_db.run(
                 query,
-                max_edges=safe_max_edges
+                max_edges=safe_max_edges,
             ).data()
 
             for record in records:
@@ -234,6 +389,8 @@ def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
                         source_node,
                         type="user",
                         label=source_username,
+                        name=source_username,
+                        username=source_username,
                     )
 
                 if not G.has_node(target_node):
@@ -241,6 +398,8 @@ def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
                         target_node,
                         type="user",
                         label=target_username,
+                        name=target_username,
+                        username=target_username,
                     )
 
                 relation = ", ".join(record.get("rel_types", []))
@@ -292,15 +451,28 @@ def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
 
             for record in posts_data:
                 username = record.get("uid")
-                post_id = f"post_{record.get('pid')}"
-                text = record.get("text") or ""
+                pid = str(record.get("pid", "")).strip()
+                post_id = f"post_{pid}"
+                text = str(record.get("text") or "")
+
+                hashtag_list = _build_hashtag_list(text)
 
                 if not G.has_node(post_id):
                     G.add_node(
                         post_id,
                         type="post_ig",
-                        label=text[:20] + "..." if len(text) > 20 else text,
-                        full_text=text,
+                        label=_short_text(text, 50),
+                        name=_short_text(text, 50),
+                        title=_short_text(text, 80),
+                        caption=text[:300],
+                        content=text[:300],
+                        text=text[:300],
+                        full_text=text[:300],
+                        post_id=pid,
+                        post_caption=text[:300],
+                        post_content=text[:300],
+                        post_text=text[:300],
+                        hashtags=hashtag_list,
                         likes=record.get("likes", 0),
                     )
 
@@ -312,6 +484,8 @@ def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
                             user_node,
                             type="user",
                             label=username,
+                            name=username,
+                            username=username,
                         )
 
                     G.add_edge(
@@ -321,29 +495,11 @@ def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
                         weight=5,
                     )
 
-                raw_tags = HASHTAG_REGEX.findall(text)
-
-                for raw_tag in raw_tags:
-                    tag = normalize_hashtag(raw_tag)
-
-                    if is_ignored_hashtag(tag):
-                        continue
-
-                    hashtag_node = f"tag_{tag}"
-
-                    if not G.has_node(hashtag_node):
-                        G.add_node(
-                            hashtag_node,
-                            type="hashtag",
-                            label=f"#{tag}",
-                        )
-
-                    G.add_edge(
-                        post_id,
-                        hashtag_node,
-                        relation="HAS_HASHTAG",
-                        weight=2,
-                    )
+                _add_hashtag_nodes_and_edges(
+                    graph=G,
+                    source_node=post_id,
+                    text=text,
+                )
 
             for record in comments_data:
                 username = record.get("uid")
@@ -352,23 +508,37 @@ def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
                     continue
 
                 user_node = f"user_{username}"
-                comment_node = f"comment_{record.get('cid')}"
-                target_node = f"post_{record.get('target_id')}"
-                text = record.get("text") or ""
+                comment_id = str(record.get("cid", "")).strip()
+                comment_node = f"comment_{comment_id}"
+                target_id = str(record.get("target_id", "")).strip()
+                target_node = f"post_{target_id}"
+                text = str(record.get("text") or "")
+
+                hashtag_list = _build_hashtag_list(text)
 
                 if not G.has_node(user_node):
                     G.add_node(
                         user_node,
                         type="user",
                         label=username,
+                        name=username,
+                        username=username,
                     )
 
                 if not G.has_node(comment_node):
                     G.add_node(
                         comment_node,
                         type="comment_ig",
-                        label=text[:20] + "..." if len(text) > 20 else text,
-                        full_text=text,
+                        label=_short_text(text, 50),
+                        name=_short_text(text, 50),
+                        caption=text[:300],
+                        content=text[:300],
+                        text=text[:300],
+                        full_text=text[:300],
+                        comment_id=comment_id,
+                        comment_text=text[:300],
+                        target_post_id=target_id,
+                        hashtags=hashtag_list,
                         likes=record.get("likes", 0),
                     )
 
@@ -387,29 +557,11 @@ def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
                         weight=3,
                     )
 
-                    raw_tags = HASHTAG_REGEX.findall(text)
-
-                    for raw_tag in raw_tags:
-                        tag = normalize_hashtag(raw_tag)
-
-                        if is_ignored_hashtag(tag):
-                            continue
-
-                        hashtag_node = f"tag_{tag}"
-
-                        if not G.has_node(hashtag_node):
-                            G.add_node(
-                                hashtag_node,
-                                type="hashtag",
-                                label=f"#{tag}",
-                            )
-
-                        G.add_edge(
-                            comment_node,
-                            hashtag_node,
-                            relation="HAS_HASHTAG",
-                            weight=2,
-                        )
+                    _add_hashtag_nodes_and_edges(
+                        graph=G,
+                        source_node=comment_node,
+                        text=text,
+                    )
 
             for record in replies_data:
                 username = record.get("uid")
@@ -418,23 +570,37 @@ def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
                     continue
 
                 user_node = f"user_{username}"
-                reply_node = f"reply_{record.get('cid')}"
-                target_node = f"comment_{record.get('target_id')}"
-                text = record.get("text") or ""
+                reply_id = str(record.get("cid", "")).strip()
+                reply_node = f"reply_{reply_id}"
+                target_id = str(record.get("target_id", "")).strip()
+                target_node = f"comment_{target_id}"
+                text = str(record.get("text") or "")
+
+                hashtag_list = _build_hashtag_list(text)
 
                 if not G.has_node(user_node):
                     G.add_node(
                         user_node,
                         type="user",
                         label=username,
+                        name=username,
+                        username=username,
                     )
 
                 if not G.has_node(reply_node):
                     G.add_node(
                         reply_node,
                         type="reply_ig",
-                        label=text[:20] + "..." if len(text) > 20 else text,
-                        full_text=text,
+                        label=_short_text(text, 50),
+                        name=_short_text(text, 50),
+                        caption=text[:300],
+                        content=text[:300],
+                        text=text[:300],
+                        full_text=text[:300],
+                        reply_id=reply_id,
+                        reply_text=text[:300],
+                        target_comment_id=target_id,
+                        hashtags=hashtag_list,
                         likes=record.get("likes", 0),
                     )
 
@@ -453,29 +619,11 @@ def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
                         weight=4,
                     )
 
-                    raw_tags = HASHTAG_REGEX.findall(text)
-
-                    for raw_tag in raw_tags:
-                        tag = normalize_hashtag(raw_tag)
-
-                        if is_ignored_hashtag(tag):
-                            continue
-
-                        hashtag_node = f"tag_{tag}"
-
-                        if not G.has_node(hashtag_node):
-                            G.add_node(
-                                hashtag_node,
-                                type="hashtag",
-                                label=f"#{tag}",
-                            )
-
-                        G.add_edge(
-                            reply_node,
-                            hashtag_node,
-                            relation="HAS_HASHTAG",
-                            weight=2,
-                        )
+                    _add_hashtag_nodes_and_edges(
+                        graph=G,
+                        source_node=reply_node,
+                        text=text,
+                    )
 
         else:
             raise HTTPException(
@@ -484,10 +632,14 @@ def _build_neo4j_graph(mode: int, limit: int = 1000, max_edges: int = 25000):
             )
 
     clean_graph_nodes(G, source="instagram")
-    apply_leiden_communities(G, weight_attr="weight")
+
+    apply_leiden_communities(
+        G,
+        weight_attr="weight",
+        community_attr="community",
+    )
 
     return G
-
 async def analyze_instagram_graph_from_neo4j(limit: int = 1000, mode: int = 1):
     try:
         G = _build_neo4j_graph(

@@ -1,5 +1,7 @@
 import os
 import re
+import csv
+import io
 import asyncio
 import tempfile
 import datetime
@@ -107,6 +109,59 @@ NORMALIZED_TO_LEGACY = {
     "like_count": "Jumlah_Like_Post",
     "comment_count": "Jumlah_Comment_Post",
 }
+
+EXPORT_HEADER_LABELS = {
+    "interaction_type": "Interaction_Type",
+    "community": "Community",
+    "source_user": "Source_User",
+    "target": "Target",
+    "post_link": "Post_Link",
+    "user_pembuat_post": "User_Pembuat_Post",
+    "post": "Post",
+    "tanggal_upload": "Tanggal_Upload",
+    "jumlah_like_post": "Jumlah_Like_Post",
+    "jumlah_views_post": "Jumlah_Views_Post",
+    "jumlah_comment_post": "Jumlah_Comment_Post",
+    "jumlah_share_post": "Jumlah_Share_Post",
+    "comment": "Komentar",
+    "reply": "Balasan_Komentar",
+    "jumlah_like_komentar": "Jumlah_Like_Komentar",
+    "jumlah_reply_komentar": "Jumlah_Reply_Komentar",
+    "hashtag": "Hashtag",
+    "media_type": "Media_Type",
+    "post_id": "Post_ID",
+    "user_id": "User_ID",
+    "likes": "Likes",
+    "like_count": "Like_Count",
+    "comment_count": "Comment_Count",
+}
+
+EXPORT_COLUMN_ORDER = [
+    "interaction_type",
+    "community",
+    "source_user",
+    "target",
+    "post_link",
+    "user_pembuat_post",
+    "post",
+    "tanggal_upload",
+    "jumlah_like_post",
+    "jumlah_views_post",
+    "jumlah_comment_post",
+    "jumlah_share_post",
+    "comment",
+    "reply",
+    "jumlah_like_komentar",
+    "jumlah_reply_komentar",
+    "hashtag",
+    "media_type",
+    "post_id",
+    "user_id",
+    "likes",
+    "like_count",
+    "comment_count",
+]
+
 
 def _extract_spreadsheet_id(spreadsheet_id: Optional[str], spreadsheet_url: Optional[str]) -> str:
     if spreadsheet_id:
@@ -700,6 +755,237 @@ def _normalize_export_value(value):
 
     return value
 
+def _clean_export_cell(value):
+    if value is None:
+        return ""
+
+    if isinstance(value, (list, tuple, set)):
+        value = ", ".join(str(item) for item in value)
+
+    if isinstance(value, dict):
+        value = str(value)
+
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        try:
+            return value.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return str(value)
+
+    text = str(value)
+
+    if text.lower() in {"nan", "nat", "none", "null"}:
+        return ""
+
+    text = text.replace("\r", " ")
+    text = text.replace("\n", " ")
+    text = text.replace("\t", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
+def _format_dataset_date_cell(value):
+    dt = _parse_to_datetime(value)
+
+    if pd.notna(dt):
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    return _clean_export_cell(value)
+
+
+def _deduplicate_headers(headers: List[str]) -> List[str]:
+    seen = {}
+    result = []
+
+    for header in headers:
+        count = seen.get(header, 0)
+
+        if count == 0:
+            result.append(header)
+        else:
+            result.append(f"{header}_{count + 1}")
+
+        seen[header] = count + 1
+
+    return result
+
+
+def _prepare_export_dataframe_for_output(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    clean_df = df.copy()
+
+    # Supaya kolom duplicate seperti likes, like_count, dan jumlah_like_post
+    # tidak muncul bersamaan saat export_all = true.
+    alias_drop_rules = {
+        "likes": "jumlah_like_post",
+        "like_count": "jumlah_like_post",
+        "comment_count": "jumlah_comment_post",
+    }
+
+    for alias_col, canonical_col in alias_drop_rules.items():
+        if alias_col in clean_df.columns and canonical_col in clean_df.columns:
+            clean_df = clean_df.drop(columns=[alias_col], errors="ignore")
+
+    ordered_columns = [
+        col for col in EXPORT_COLUMN_ORDER
+        if col in clean_df.columns
+    ]
+
+    remaining_columns = [
+        col for col in clean_df.columns
+        if col not in ordered_columns
+    ]
+
+    clean_df = clean_df[ordered_columns + remaining_columns]
+
+    for date_col in ["tanggal_upload", "Tanggal_Upload"]:
+        if date_col in clean_df.columns:
+            clean_df[date_col] = clean_df[date_col].apply(_format_dataset_date_cell)
+
+    for col in clean_df.columns:
+        clean_df[col] = clean_df[col].apply(_clean_export_cell)
+
+    renamed_columns = [
+        EXPORT_HEADER_LABELS.get(col, str(col).replace("_", " ").title())
+        for col in clean_df.columns
+    ]
+
+    clean_df.columns = _deduplicate_headers(renamed_columns)
+
+    return clean_df
+
+
+def _clean_export_rows(rows: list[list]) -> list[list]:
+    return [
+        [_clean_export_cell(cell) for cell in row]
+        for row in rows
+    ]
+
+
+def _pad_rows(rows: list[list], min_cols: int = 1) -> list[list]:
+    if not rows:
+        return []
+
+    max_cols = max(max(len(row) for row in rows), min_cols)
+
+    return [
+        list(row) + [""] * (max_cols - len(row))
+        for row in rows
+    ]
+
+
+def _dataframe_to_sheet_values(df: pd.DataFrame) -> list[list]:
+    if df is None or df.empty:
+        return []
+
+    values = [df.columns.tolist()]
+    values.extend(df.values.tolist())
+
+    return _pad_rows(values, min_cols=len(df.columns))
+
+def _column_letter(index: int) -> str:
+    result = ""
+
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        result = chr(65 + remainder) + result
+
+    return result
+
+
+def _get_or_create_worksheet(spreadsheet, title: str, rows: int = 100, cols: int = 20):
+    try:
+        return spreadsheet.worksheet(title)
+    except gspread.exceptions.WorksheetNotFound:
+        return spreadsheet.add_worksheet(
+            title=title,
+            rows=rows,
+            cols=cols,
+        )
+
+
+def _write_values_to_worksheet(worksheet, values: list[list]):
+    values = _pad_rows(values)
+
+    if not values:
+        values = [[""]]
+
+    rows_count = max(len(values) + 10, 100)
+    cols_count = max(max(len(row) for row in values) + 2, 20)
+
+    worksheet.clear()
+
+    try:
+        worksheet.resize(rows=rows_count, cols=cols_count)
+    except Exception:
+        pass
+
+    worksheet.update(values, "A1")
+
+    return len(values), max(len(row) for row in values)
+
+
+def _format_sheet_table(worksheet, rows_count: int, cols_count: int, header_row: int = 1):
+    if rows_count <= 0 or cols_count <= 0:
+        return
+
+    last_col = _column_letter(cols_count)
+
+    try:
+        worksheet.freeze(rows=header_row)
+    except Exception:
+        pass
+
+    try:
+        worksheet.format(
+            f"A1:{last_col}{rows_count}",
+            {
+                "verticalAlignment": "TOP",
+                "wrapStrategy": "WRAP",
+            },
+        )
+    except Exception:
+        pass
+
+    try:
+        worksheet.format(
+            f"A{header_row}:{last_col}{header_row}",
+            {
+                "backgroundColor": {
+                    "red": 0.89,
+                    "green": 0.91,
+                    "blue": 0.96,
+                },
+                "textFormat": {
+                    "bold": True,
+                },
+                "horizontalAlignment": "CENTER",
+            },
+        )
+    except Exception:
+        pass
+
+    try:
+        worksheet.set_basic_filter(f"A{header_row}:{last_col}{rows_count}")
+    except Exception:
+        pass
+
+    try:
+        worksheet.columns_auto_resize(0, min(cols_count, 26))
+    except Exception:
+        pass
+
 def _get_export_summary_rows(payload) -> list[list]:
     """
     Membuat baris ringkasan yang akan ditaruh di atas export CSV
@@ -757,37 +1043,38 @@ def _get_export_summary_rows(payload) -> list[list]:
         for row in rows
     ]
 
-def _build_csv_with_summary(summary_rows: list[list], df: pd.DataFrame) -> str:
-    """
-    Format CSV:
-    - Summary di bagian atas
-    - Baris kosong
-    - Dataset export di bawahnya
-    """
+def export_csv(payload, current_admin=None):
+    try:
+        df = _get_export_dataframe(payload)
 
-    output = []
+        if df is None or df.empty:
+            raise HTTPException(status_code=404, detail="Tidak ada data ditemukan.")
 
-    for row in summary_rows:
-        output.append(row)
+        df = _prepare_export_dataframe_for_output(df)
 
-    output.append([])
-    output.append(["DATASET EXPORT"])
-    output.append([])
+        summary_rows = _get_export_summary_rows(payload)
+        csv_buffer = _build_csv_with_summary(summary_rows, df)
 
-    output.append(df.columns.tolist())
+        filename = (
+            f"SNA_Report_{payload.source.upper()}_"
+            f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
 
-    safe_df = df.fillna("").astype(str)
+        return StreamingResponse(
+            iter([csv_buffer.encode("utf-8-sig")]),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            },
+        )
 
-    for row in safe_df.values.tolist():
-        output.append(row)
-
-    csv_buffer = pd.DataFrame(output).to_csv(
-        index=False,
-        header=False,
-        encoding="utf-8-sig",
-    )
-
-    return csv_buffer
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Export CSV gagal: {str(e)}",
+        )
 
 def _get_export_dataframe(payload) -> pd.DataFrame:
     source_type = payload.source
@@ -813,49 +1100,43 @@ def _get_export_dataframe(payload) -> pd.DataFrame:
         export_all=payload.export_all,
     )
 
-def export_csv(payload, current_admin=None):
-    try:
-        df = get_master_dataframe(
-            source_type=payload.source,
-            start_date=payload.start_date,
-            end_date=payload.end_date,
-            selected_columns=payload.selected_columns,
-            export_all=payload.export_all,
-        )
+def _build_csv_with_summary(summary_rows: list[list], df: pd.DataFrame) -> str:
+    summary_rows = _clean_export_rows(summary_rows)
 
-        if df is None or df.empty:
-            raise HTTPException(status_code=404, detail="Tidak ada data ditemukan.")
+    output_rows = []
+    output_rows.extend(summary_rows)
+    output_rows.append([])
+    output_rows.append(["DATASET EXPORT"])
+    output_rows.append([])
 
-        summary_rows = _get_export_summary_rows(payload)
-        csv_buffer = _build_csv_with_summary(summary_rows, df)
+    output_rows.append(df.columns.tolist())
+    output_rows.extend(df.values.tolist())
 
-        filename = (
-            f"SNA_Report_{payload.source.upper()}_"
-            f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        )
+    buffer = io.StringIO()
 
-        return StreamingResponse(
-            iter([csv_buffer]),
-            media_type="text/csv",
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
-            },
-        )
+    # Penting untuk Excel:
+    # Memberitahu Excel bahwa delimiter yang dipakai adalah semicolon.
+    buffer.write("sep=;\n")
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Export CSV gagal: {str(e)}",
-        )
+    writer = csv.writer(
+        buffer,
+        delimiter=";",
+        quotechar='"',
+        quoting=csv.QUOTE_MINIMAL,
+        lineterminator="\n",
+    )
 
+    writer.writerows(output_rows)
+
+    return buffer.getvalue()
 def export_sheets(payload, current_admin: Optional[Dict[str, Any]] = None):
     try:
         df = _get_export_dataframe(payload)
 
         if df.empty:
             raise HTTPException(status_code=404, detail="Tidak ada data ditemukan.")
+
+        df = _prepare_export_dataframe_for_output(df)
 
         spreadsheet_title = (
             payload.spreadsheet_title
@@ -878,29 +1159,48 @@ def export_sheets(payload, current_admin: Optional[Dict[str, Any]] = None):
 
         sh = gc.create(spreadsheet_title)
 
-        summary_rows = _get_export_summary_rows(payload)
+        summary_rows = _clean_export_rows(_get_export_summary_rows(payload))
+        summary_rows = _pad_rows(summary_rows, min_cols=3)
 
         summary_worksheet = sh.sheet1
         summary_worksheet.update_title("Summary")
-        summary_worksheet.clear()
-        summary_worksheet.update(summary_rows, "A1")
+
+        summary_rows_count, summary_cols_count = _write_values_to_worksheet(
+            summary_worksheet,
+            summary_rows,
+        )
+        _format_sheet_table(
+            summary_worksheet,
+            rows_count=summary_rows_count,
+            cols_count=summary_cols_count,
+            header_row=1,
+        )
 
         export_worksheet = sh.add_worksheet(
             title="Export Data",
-            rows=max(len(df) + 5, 100),
+            rows=max(len(df) + 10, 100),
             cols=max(len(df.columns) + 2, 20),
         )
 
-        safe_df = df.fillna("").astype(str)
-        export_values = [safe_df.columns.tolist()] + safe_df.values.tolist()
+        export_values = _dataframe_to_sheet_values(df)
 
-        export_worksheet.clear()
-        export_worksheet.update(export_values, "A1")
+        export_rows_count, export_cols_count = _write_values_to_worksheet(
+            export_worksheet,
+            export_values,
+        )
+        _format_sheet_table(
+            export_worksheet,
+            rows_count=export_rows_count,
+            cols_count=export_cols_count,
+            header_row=1,
+        )
 
         admin_email = None
 
         if current_admin:
             admin_email = current_admin.get("email")
+
+        now_iso = datetime.datetime.now().isoformat()
 
         doc_data = {
             "sheet_id": sh.id,
@@ -912,8 +1212,8 @@ def export_sheets(payload, current_admin: Optional[Dict[str, Any]] = None):
             "created_by_uid": current_admin.get("uid") if current_admin else None,
             "created_by_email": admin_email,
             "storage_owner": "login_user_drive",
-            "created_at": datetime.datetime.now().isoformat(),
-            "updated_at": datetime.datetime.now().isoformat(),
+            "created_at": now_iso,
+            "updated_at": now_iso,
         }
 
         try:
@@ -924,7 +1224,7 @@ def export_sheets(payload, current_admin: Optional[Dict[str, Any]] = None):
 
         return {
             "status": "success",
-            "message": "Data berhasil diexport ke Google Sheets dengan worksheet Summary dan Export Data.",
+            "message": "Data berhasil diexport ke Google Sheets dengan format rapi pada worksheet Summary dan Export Data.",
             "spreadsheet_title": spreadsheet_title,
             "spreadsheet_url": sh.url,
             "source": payload.source,
@@ -973,35 +1273,11 @@ def export_sheets(payload, current_admin: Optional[Dict[str, Any]] = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Export Sheets gagal: {str(e)}")
 
-def _first_worksheet(spreadsheet):
-    worksheet = spreadsheet.get_worksheet(0)
-
-    if worksheet is None:
-        worksheet = spreadsheet.add_worksheet(
-            title="Sheet1",
-            rows=100,
-            cols=20,
-        )
-
-    return worksheet
-
 def _format_export_date(value):
     if not value:
         return "-"
 
     return str(value)
-
-def _first_worksheet(spreadsheet):
-    worksheet = spreadsheet.get_worksheet(0)
-
-    if worksheet is None:
-        worksheet = spreadsheet.add_worksheet(
-            title="Sheet1",
-            rows=100,
-            cols=20,
-        )
-
-    return worksheet
 
 def _get_app_summary_rows():
     summary = {
@@ -1277,6 +1553,8 @@ def export_existing_sheets(payload, current_admin: Optional[Dict[str, Any]] = No
         if df.empty:
             raise HTTPException(status_code=404, detail="Tidak ada data ditemukan.")
 
+        df = _prepare_export_dataframe_for_output(df)
+
         spreadsheet_id = _extract_spreadsheet_id(
             getattr(payload, "spreadsheet_id", None),
             getattr(payload, "spreadsheet_url", None),
@@ -1300,21 +1578,46 @@ def export_existing_sheets(payload, current_admin: Optional[Dict[str, Any]] = No
 
             raise
 
-        worksheet = _first_worksheet(spreadsheet)
+        summary_worksheet = _get_or_create_worksheet(
+            spreadsheet,
+            title="Summary",
+            rows=100,
+            cols=20,
+        )
 
-        values = _build_sheet_export_values(payload, df)
+        export_worksheet = _get_or_create_worksheet(
+            spreadsheet,
+            title="Export Data",
+            rows=max(len(df) + 10, 100),
+            cols=max(len(df.columns) + 2, 20),
+        )
 
-        worksheet.clear()
+        summary_rows = _clean_export_rows(_get_export_summary_rows(payload))
+        summary_rows = _pad_rows(summary_rows, min_cols=3)
 
-        needed_rows = max(len(values) + 10, 100)
-        needed_cols = max(max(len(row) for row in values) + 5, 20)
+        summary_rows_count, summary_cols_count = _write_values_to_worksheet(
+            summary_worksheet,
+            summary_rows,
+        )
+        _format_sheet_table(
+            summary_worksheet,
+            rows_count=summary_rows_count,
+            cols_count=summary_cols_count,
+            header_row=1,
+        )
 
-        try:
-            worksheet.resize(rows=needed_rows, cols=needed_cols)
-        except Exception:
-            pass
+        export_values = _dataframe_to_sheet_values(df)
 
-        worksheet.update(values, "A1")
+        export_rows_count, export_cols_count = _write_values_to_worksheet(
+            export_worksheet,
+            export_values,
+        )
+        _format_sheet_table(
+            export_worksheet,
+            rows_count=export_rows_count,
+            cols_count=export_cols_count,
+            header_row=1,
+        )
 
         now_iso = datetime.datetime.now().isoformat()
 
@@ -1322,7 +1625,7 @@ def export_existing_sheets(payload, current_admin: Optional[Dict[str, Any]] = No
             "sheet_id": spreadsheet.id,
             "sheet_url": spreadsheet.url,
             "sheet_name": spreadsheet.title,
-            "worksheet_name": worksheet.title,
+            "worksheet_name": "Summary, Export Data",
             "source_type": payload.source,
             "rows_count": len(df),
             "columns": df.columns.tolist(),
@@ -1346,11 +1649,14 @@ def export_existing_sheets(payload, current_admin: Optional[Dict[str, Any]] = No
 
         return {
             "status": "success",
-            "message": "Data berhasil diexport ke tab pertama Google Sheets user.",
+            "message": "Data berhasil diexport ke Google Sheets dengan worksheet Summary dan Export Data.",
             "spreadsheet_id": spreadsheet.id,
             "spreadsheet_url": spreadsheet.url,
             "spreadsheet_title": spreadsheet.title,
-            "worksheet_name": worksheet.title,
+            "worksheets": [
+                "Summary",
+                "Export Data",
+            ],
             "source": payload.source,
             "rows_count": len(df),
             "columns": df.columns.tolist(),
@@ -1364,12 +1670,13 @@ def export_existing_sheets(payload, current_admin: Optional[Dict[str, Any]] = No
                 "id": doc_id,
                 "sheet_url": spreadsheet.url,
                 "sheet_name": spreadsheet.title,
-                "worksheet_name": worksheet.title,
+                "worksheet_name": "Summary, Export Data",
             },
             "debug": {
-                "target_tab": worksheet.title,
-                "values_rows_sent": len(values),
-                "values_cols_sent": max(len(row) for row in values),
+                "summary_rows_sent": summary_rows_count,
+                "summary_cols_sent": summary_cols_count,
+                "export_rows_sent": export_rows_count,
+                "export_cols_sent": export_cols_count,
                 "data_rows_count": len(df),
                 "history_saved": history_saved,
                 "history_error": history_error,

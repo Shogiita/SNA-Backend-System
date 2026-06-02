@@ -2,13 +2,7 @@ import os
 import sys
 import types
 from unittest.mock import MagicMock
-
 import pytest
-
-
-# ============================================================
-# MOCK ENVIRONMENT VARIABLES BEFORE APP IMPORT
-# ============================================================
 
 os.environ.setdefault("FB_APP_ID", "test_fb_app_id")
 os.environ.setdefault("INSTAGRAM_APP_ID", "test_instagram_app_id")
@@ -88,11 +82,6 @@ fake_database_module.get_neo4j_session = MagicMock(
 
 sys.modules["app.database"] = fake_database_module
 
-
-# ============================================================
-# MOCK firebase_admin BEFORE APP IMPORT
-# ============================================================
-
 fake_firebase_admin = types.ModuleType("firebase_admin")
 fake_firebase_auth = types.ModuleType("firebase_admin.auth")
 fake_firebase_credentials = types.ModuleType("firebase_admin.credentials")
@@ -122,11 +111,6 @@ sys.modules["firebase_admin"] = fake_firebase_admin
 sys.modules["firebase_admin.auth"] = fake_firebase_auth
 sys.modules["firebase_admin.credentials"] = fake_firebase_credentials
 sys.modules["firebase_admin.firestore"] = fake_firebase_firestore
-
-
-# ============================================================
-# FIXTURES
-# ============================================================
 
 @pytest.fixture(scope="function")
 def mock_db():
